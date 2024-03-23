@@ -18,9 +18,9 @@ Entry_With_Name :: struct{
 
 Entry :: struct {
 	// TODO reduce sizes, pack efficiently
-	min, max: i16,
 	sum:      i64,
 	count:    u32,
+	min, max: i16,
 }
 
 // TODO threading?
@@ -74,17 +74,15 @@ main :: proc() {
 				name := line[:index - 1]
 				measurement_str := line[index + 1:]
 				pt.start("parse measurem.")
-				// TODO use fixed point numbers
-				measurement: i16
-				is_negative: b32
 				FACTOR :: 10
+				measurement: i16
+				is_negative := measurement_str[0] == '-'
+				if is_negative {
+					measurement_str = measurement_str[1:]
+				}
 				for r in measurement_str {
-					switch r {
-					case '-':
-						is_negative = true
-					case '0' ..= '9':
-						measurement *= FACTOR
-						measurement += i16(u8(r) - u8('0'))
+					if r != '.'{
+						measurement = FACTOR * measurement + i16(r-'0')
 					}
 				}
 				if is_negative do measurement *= -1
@@ -136,8 +134,10 @@ main :: proc() {
 	pt.stop()
 	pt.start("calculate mean")
 	for entry in list {
-		mean := entry.sum / i64(entry.count)
-		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, entry.min, mean, entry.max)
+		mean := f64( entry.sum / i64(entry.count) / 10 )
+		min := f64(entry.min / 10)
+		max := f64(entry.max / 10)
+		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
 	}
 	pt.stop()
 }
