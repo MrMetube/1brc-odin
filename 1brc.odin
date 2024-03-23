@@ -11,10 +11,16 @@ import pt "perftime"
 DATA_PATH ::
 	"C:/1brc/data/measurements_10000.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
 
+Entry_With_Name :: struct{
+	using e : Entry,
+	name : string,
+}
+
 Entry :: struct {
-	name:                 string,
 	// TODO reduce sizes, pack efficiently
-	min, max, sum, count: f64,
+	min, max: i16,
+	sum:      i64,
+	count:    u32,
 }
 
 // TODO threading?
@@ -69,20 +75,18 @@ main :: proc() {
 				measurement_str := line[index + 1:]
 				pt.start("parse measurem.")
 				// TODO use fixed point numbers
-				measurement: f64
+				measurement: i16
 				is_negative: b32
 				FACTOR :: 10
-				DIVISOR :: .1
 				for r in measurement_str {
 					switch r {
 					case '-':
 						is_negative = true
 					case '0' ..= '9':
 						measurement *= FACTOR
-						measurement += f64(u8(r) - u8('0'))
+						measurement += i16(u8(r) - u8('0'))
 					}
 				}
-				measurement *= DIVISOR
 				if is_negative do measurement *= -1
 				pt.stop()
 
@@ -90,16 +94,15 @@ main :: proc() {
 				name_str := string(name)
 				if name_str not_in entries {
 					entries[name_str] = Entry {
-						name  = name_str,
 						min   = measurement,
 						max   = measurement,
-						sum   = measurement,
+						sum   = i64(measurement),
 						count = 1,
 					}
 				} else {
 					e := &entries[name_str]
 					e.count += 1
-					e.sum += measurement
+					e.sum += i64(measurement)
 					// TODO unify, cant be both
 					e.min = min(e.min, measurement)
 					e.max = max(e.max, measurement)
@@ -108,26 +111,32 @@ main :: proc() {
 			}
 		}
 		if data_index % 100_000 == 0 {
-			fmt.printf("\t\r%v",data_index)
+			fmt.printf("\t\r%v", data_index)
 		}
 	}
+	fmt.println()
 	pt.stop()
 	// TODO sort and calculate mean
 	pt.start("sort")
-	list := make([]Entry, len(entries))
+	list := make([]Entry_With_Name, len(entries))
 	index: int
-	for _, e in entries {
-		list[index] = e
+	// TODO dont copy
+	for name, e in entries {
+		list[index] = Entry_With_Name{
+			e = e,
+			name = name,
+		}
 		index += 1
 	}
-	lexical :: proc(a, b: Entry) -> bool {
-		return strings.compare(a.name, b.name) < 0
+	// TODO undo inverse sorting 
+	lexical :: proc(a, b: Entry_With_Name) -> bool {
+		return strings.compare(a.name, b.name) > 0
 	}
 	slice.sort_by(list, lexical)
 	pt.stop()
 	pt.start("calculate mean")
 	for entry in list {
-		mean := entry.sum / entry.count
+		mean := entry.sum / i64(entry.count)
 		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, entry.min, mean, entry.max)
 	}
 	pt.stop()
