@@ -8,8 +8,7 @@ import "core:strings"
 import "core:sys/windows"
 import pt "perftime"
 
-DATA_PATH :: "C:/1brc/data/measurements_10000.txt" when ODIN_DEBUG else  "./data/measurements.txt"
-MMAP :: true
+DATA_PATH :: "C:/1brc/data/measurements_10000.txt" when ODIN_DEBUG else "./data/measurements.txt"
 
 Entry :: struct {
 	name:                 string,
@@ -20,40 +19,34 @@ Entry :: struct {
 main :: proc() {
 	pt.begin_profiling()
 	pt.start("read file")
-	when MMAP {
-		win_path := windows.utf8_to_utf16(DATA_PATH)
-		file_handle := windows.CreateFileW(
-			&win_path[0],
-			windows.GENERIC_READ,
-			windows.FILE_SHARE_READ,
-			nil,
-			windows.OPEN_EXISTING,
-			windows.FILE_ATTRIBUTE_NORMAL,
-			nil,
-		)
+	win_path := windows.utf8_to_utf16(DATA_PATH)
+	file_handle := windows.CreateFileW(
+		&win_path[0],
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		nil,
+	)
 
-		if file_handle == nil do print_error_and_panic()
+	if file_handle == nil do print_error_and_panic()
 
-		file_mapping_handle := windows.CreateFileMappingW(
-			file_handle,
-			nil,
-			2,
-			0,
-			0,
-			nil,
-		)
-		if file_mapping_handle == nil do print_error_and_panic()
-		
-		file_size: windows.LARGE_INTEGER
-		windows.GetFileSizeEx(file_handle, &file_size)
-		starting_address: rawptr = windows.MapViewOfFile(file_mapping_handle, windows.FILE_MAP_READ, 0, 0, 0)
-		if starting_address == nil do print_error_and_panic()
-		
-		data := mem.ptr_to_bytes(cast(^u8)starting_address, int(file_size))
-	}else{
-		data, ok := os.read_entire_file_from_filename(DATA_PATH)
-		assert(ok, "Could not load measurements")
-	}
+	file_mapping_handle := windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
+	if file_mapping_handle == nil do print_error_and_panic()
+
+	file_size: windows.LARGE_INTEGER
+	windows.GetFileSizeEx(file_handle, &file_size)
+	starting_address: rawptr = windows.MapViewOfFile(
+		file_mapping_handle,
+		windows.FILE_MAP_READ,
+		0,
+		0,
+		0,
+	)
+	if starting_address == nil do print_error_and_panic()
+
+	data := mem.ptr_to_bytes(cast(^u8)starting_address, int(file_size))
 	pt.stop()
 	pt.start("parsing")
 	str := string(data)
@@ -138,5 +131,5 @@ print_error_and_panic :: proc() {
 		nil,
 	)
 	message, _ := windows.utf16_to_utf8(buffer[:length])
-	fmt.panicf("ERROR: %s\n",string(message))
+	fmt.panicf("ERROR: %s\n", string(message))
 }
