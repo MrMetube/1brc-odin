@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:time"
 
 DO_PROFILE :: true
+DO_TIMING :: !true
 
 
 Timing :: struct {
@@ -23,58 +24,13 @@ Timer :: struct {
 	timeblock_cursor:       int,
 }
 
-when !DO_PROFILE {
-
-	begin_profiling :: proc() {}
-	end_profiling :: proc() {}
+when !DO_TIMING{
 	start :: proc(key: string, byte_count: i64 = 0) {}
 	stop :: proc() {}
 	_make_timing :: proc(byte_count: i64) -> (t: ^Timing) {return nil}
 	_start_timing :: proc(using t: ^Timing, byte_count: i64) {}
 	_stop_timing :: proc(using t: ^Timing) {}
-
-} else {
-
-	the_timer: Timer
-
-	begin_profiling :: proc() {
-		using the_timer
-		total_start = time.now()
-	}
-
-	end_profiling :: proc() {
-		using the_timer
-		total_end = time.now()
-
-		total_time := time.diff(total_start, total_end)
-		fmt.printf("%16s[% 9s]: %v \n", "Total", "hit count", total_time)
-
-		DELTA :: 100
-
-		for key, value in timings {
-			using value
-			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
-			fmt.printf("%16s[% 9d]: %v (%.2f%%", key, hit_count, exclusive_time, percent_ex)
-			if inclusive_time - exclusive_time > DELTA {
-				percent_in := 100 * f64(inclusive_time) / f64(total_time)
-				fmt.printf(", %v %.2f%% w/children", inclusive_time, percent_in)
-			}
-			fmt.print(')')
-			if call_depth != 0 {
-				fmt.printf(
-					"\n    ERROR: Call depth is %v \n    Check symmetry of start and stop calls for '%s'",
-					call_depth,
-					key,
-				)
-			}
-
-			// TODO print Bandwidth
-
-			fmt.println()
-		}
-		timings = {}
-	}
-
+}else{
 	start :: proc(key: string, byte_count: i64 = 0) {
 		using the_timer
 		timeblock_keys[timeblock_cursor] = key
@@ -126,4 +82,52 @@ when !DO_PROFILE {
 
 		hit_count += 1
 	}
-} // end DO_PROFILE
+} // when DO_TIMING
+
+when !DO_PROFILE {
+	begin_profiling :: proc() {}
+	end_profiling :: proc() {}
+} else {
+
+	the_timer: Timer
+
+	begin_profiling :: proc() {
+		using the_timer
+		total_start = time.now()
+	}
+
+	end_profiling :: proc() {
+		using the_timer
+		total_end = time.now()
+
+		total_time := time.diff(total_start, total_end)
+		fmt.printf("%16s[% 9s]: %v \n", "Total", "hit count", total_time)
+
+		DELTA :: 100
+
+		for key, value in timings {
+			using value
+			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
+			fmt.printf("%16s[% 9d]: %v (%.2f%%", key, hit_count, exclusive_time, percent_ex)
+			if inclusive_time - exclusive_time > DELTA {
+				percent_in := 100 * f64(inclusive_time) / f64(total_time)
+				fmt.printf(", %v %.2f%% w/children", inclusive_time, percent_in)
+			}
+			fmt.print(')')
+			if call_depth != 0 {
+				fmt.printf(
+					"\n    ERROR: Call depth is %v \n    Check symmetry of start and stop calls for '%s'",
+					call_depth,
+					key,
+				)
+			}
+
+			// TODO print Bandwidth
+
+			fmt.println()
+		}
+		timings = {}
+	}
+
+	
+} // when DO_PROFILE
