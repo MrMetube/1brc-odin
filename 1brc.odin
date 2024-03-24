@@ -1,7 +1,7 @@
 package main
 
-import pq "core:container/priority_queue"
 import "core:fmt"
+import "core:hash"
 import "core:mem"
 import "core:os"
 import "core:slice"
@@ -23,18 +23,24 @@ Result_Entry :: struct {
 	name:           string,
 	min, mean, max: f32,
 }
+Mapping :: map[u32]Entry
 
 ParseArgs :: struct {
 	data:    []u8,
-	entries: map[string]Entry,
+	entries: Mapping,
+	names:   map[u32]string,
 }
 
 main :: proc() {
 	pt.begin_profiling()
 	defer pt.end_profiling()
+
 	data := load_data()
-	when ODIN_DEBUG {
-		entries := parse_entries(data)
+	when false && ODIN_DEBUG {
+		pt.start("parsing")
+		entries, names := parse_entries(data)
+		defer delete(entries)
+		pt.stop()
 	} else {
 		pt.start("parsing")
 		core_count := os.processor_core_count()
@@ -44,52 +50,56 @@ main :: proc() {
 		arg_list := make([]ParseArgs, core_count)
 
 		parse_entries_args :: proc(a: ^ParseArgs) {
-			result := parse_entries(a.data)
-			a.entries = result
+			a.entries, a.names = parse_entries(a.data)
 		}
 		for _, i in threads {
 			args := &arg_list[i]
 			args.data = parts[i]
-			args.entries = make(map[string]Entry)
+			args.entries = make(Mapping)
 
 			t := thread.create_and_start_with_poly_data(args, parse_entries_args)
 			threads[i] = t
 		}
 		thread.join_multiple(..threads)
-
-		entries: map[string]Entry
+		entries: Mapping
+		names: map[u32]string
 		for a in arg_list {
-			for name, entry in a.entries {
-				if name not_in entries {
-					entries[name] = entry
+			for hash, entry in a.entries {
+				if hash not_in entries {
+					entries[hash] = entry
 				} else {
-					e := &entries[name]
+					e := &entries[hash]
 					e.count += entry.count
 					e.sum += entry.sum
 					e.min = min(entry.min, e.min)
 					e.max = max(entry.max, e.max)
 				}
 			}
+			for hash, name in a.names {
+				names[hash] = name
+			}
 		}
 		pt.stop()
 	}
 	pt.start("find mean")
 	list := make([]Result_Entry, len(entries))
+	defer delete(list)
 	index: int
-	for name in entries {
+	for hash in entries {
 		defer index += 1
-		e: ^Entry = &entries[name]
+		e: ^Entry = &entries[hash]
 		value := Result_Entry {
 			mean = f32(e.sum) / f32(e.count) * .1,
 			min  = f32(e.min) * .1,
 			max  = f32(e.max) * .1,
-			name = name,
+			name = names[hash],
 		}
 		list[index] = value
 	}
 	pt.stop()
 
 	pt.start("sort")
+	
 	lexical :: proc(a, b: Result_Entry) -> bool {
 		return strings.compare(a.name, b.name) < 0
 	}
@@ -98,6 +108,7 @@ main :: proc() {
 
 	pt.start("print")
 	builder, err := strings.builder_make()
+	defer strings.builder_destroy(&builder)
 	assert(err == nil, "Failed to make a string builder")
 	for entry in list {
 		fmt.sbprint(
@@ -114,7 +125,7 @@ main :: proc() {
 
 split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 	result := make([][]u8, count)
-	splits := make([]int, count)
+	splits := make([]int, count, context.temp_allocator)
 	stride := len(data) / count
 
 	for i in 1 ..< count {
@@ -131,9 +142,10 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 	return result
 }
 
-parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
+parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
 	last: int
-	line: []u8
+	line: []u8 = ---
+
 	for r, data_index in data {
 		if r == '\n' {
 			line = data[last:data_index - 1] // dont include the \r
@@ -146,58 +158,64 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 				}
 			}
 			name := line[:colon - 1]
-			str := line[colon + 1:]
+			temp := line[colon + 1:]
 
-			when ODIN_DEBUG do pt.start("measurement")
-			measurement: i16
-			// the length of the measurement only varies by sign and <10 or >=10
-			num :: #force_inline proc(u: u8) -> i16 {return i16(u - '0')}
-			length := len(str)
-			switch {
-			case length == 3:
-				// positive and < 10
-				measurement = num(str[0]) * 10 + num(str[2])
-			case length == 4 && str[0] == '-':
-				// negative and < 10 or
-				measurement = -(num(str[1]) * 10 + num(str[3]))
-			case length == 4:
-				// positive and > 10
-				measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
-			case length == 5:
-				// negative and > 10
-				measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
-			}
-			when ODIN_DEBUG do pt.stop()
+			temperature: i16 = parse_temperature(temp)
 
-			when ODIN_DEBUG do pt.start("update entries")
-			name_str := string(name)
-			e, ok := &entries[name_str]
+			h := hash.fnv32a(name)
+			e, ok := &entries[h]
 			if !ok {
-				entries[name_str] = Entry {
-					min   = measurement,
-					max   = measurement,
-					sum   = i32(measurement),
+				entries[h] = Entry {
+					min   = temperature,
+					max   = temperature,
+					sum   = i32(temperature),
 					count = 1,
 				}
+				names[h] = string(name)
 			} else {
 				e.count += 1
-				e.sum += i32(measurement)
-				if measurement < e.min {
-					e.min = measurement
-				} else if measurement > e.max {
-					e.max = measurement
+				e.sum += i32(temperature)
+				if temperature < e.min {
+					e.min = temperature
+				} else if temperature > e.max {
+					e.max = temperature
 				}
 			}
-			when ODIN_DEBUG do pt.stop()
 		}
 
 	}
-	return entries
+	return entries, names
+}
+
+parse_temperature :: proc "contextless" (s: []u8) -> (temperature: i16) {
+	// the length of the temperature only varies by sign and <10 or >=10
+	num :: #force_inline proc "contextless" (u: u8) -> i16 {return i16(u - '0')}
+	make_num :: #force_inline proc "contextless" (hundreds, teens, units: u8) -> i16 {
+		return num(hundreds) * 100 + num(teens) * 10 + num(units)
+	}
+
+	length := len(s)
+	switch {
+	case length == 3:
+		// positive and < 10
+		temperature = make_num('0', s[0], s[2])
+	case length == 4 && s[0] == '-':
+		// negative and < 10 or
+		temperature = -make_num('0', s[1], s[3])
+	case length == 4:
+		// positive and > 10
+		temperature = make_num(s[0], s[1], s[3])
+	case:
+		// length == 5
+		// negative and > 10
+		temperature = -make_num(s[1], s[2], s[4])
+	}
+	return
 }
 
 load_data :: proc() -> (data: []u8) {
-	pt.start("read file")
-	defer pt.stop()
+	pt.start_scope(#procedure)
+
 	win_path := windows.utf8_to_utf16(DATA_PATH)
 	file_handle := windows.CreateFileW(
 		&win_path[0],
