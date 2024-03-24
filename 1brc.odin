@@ -171,7 +171,7 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 
 			when ODIN_DEBUG do pt.start("update entries")
 			name_str := string(name)
-			e, ok := entries[name_str]
+			e, ok := &entries[name_str]
 			if !ok {
 				entries[name_str] = Entry {
 					min   = measurement,
