@@ -75,6 +75,7 @@ main :: proc() {
 			for c, index in line {
 				if c == ';' {
 					colon = index
+					break
 				}
 			}
 			name := line[:colon - 1]
@@ -84,34 +85,23 @@ main :: proc() {
 			measurement: i16
 
 			// the length of the measurement only varies by sign and <10 or >=10
-			// num :: #force_inline proc "contextless" (u: u8) -> i16 {return i16(u - '0')}
-			// switch len(str) {
-			// case 3:
-			// 	// positive and < 10
-			// 	measurement = num(str[0]) * 10 + num(str[2])
-			// case 4:
-			// 	// negative and < 10 or positive and > 10
-			// 	if str[0] == '-' {
-			// 		measurement = -(num(str[1]) * 10 + num(str[3]))
-			// 	} else {
-			// 		measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
-			// 	}
-			// case 5:
-			// 	// negative and > 10
-			// 	measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
-
-			// }
-			is_negative := str[0] == '-'
-			start := is_negative ? 1 : 0
-			for i in start..<len(str) {
-				if str[i] == '.' {
-					measurement = FACTOR * measurement + i16(str[i+1] - '0')
-					break
-				}else{
-					measurement = FACTOR * measurement + i16(str[i] - '0')
+			num :: #force_inline proc "contextless" (u: u8) -> i16 {return i16(u - '0')}
+			switch len(str) {
+			case 3:
+				// positive and < 10
+				measurement = num(str[0]) * 10 + num(str[2])
+			case 4:
+				// negative and < 10 or positive and > 10
+				if str[0] == '-' {
+					measurement = -(num(str[1]) * 10 + num(str[3]))
+				} else {
+					measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
 				}
+			case 5:
+				// negative and > 10
+				measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
+
 			}
-			if is_negative do measurement *= -1
 			pt.stop()
 
 			pt.start("update entries")
