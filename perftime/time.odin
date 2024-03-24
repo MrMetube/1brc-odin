@@ -1,17 +1,22 @@
 package perftime
 
 import "core:fmt"
+import "core:slice"
 import "core:time"
 
 DO_PROFILE :: true
-DO_TIMING :: !true
-
+DO_TIMING :: true
 
 Timing :: struct {
 	start:                                              time.Time,
 	exclusive_time, inclusive_time, old_inclusive_time: time.Duration,
 	call_depth, hit_count, proccessed_byte_count:       i64,
 	parent:                                             ^Timing,
+}
+
+_Timing_With_Name :: struct {
+	using t : ^Timing,
+	name: string,
 }
 
 MAX_BLOCK_DEPTH :: 1024 * 1024
@@ -24,7 +29,7 @@ Timer :: struct {
 	timeblock_cursor:       int,
 }
 
-when !DO_TIMING{
+when !DO_PROFILE || !DO_TIMING {
 	start :: proc(key: string, byte_count: i64 = 0) {}
 	stop :: proc() {}
 	_make_timing :: proc(byte_count: i64) -> (t: ^Timing) {return nil}
@@ -105,10 +110,27 @@ when !DO_PROFILE {
 
 		DELTA :: 100
 
-		for key, value in timings {
+		list := make([]_Timing_With_Name, len(timings))
+		index:int
+		for key, t in timings {
+			defer index += 1
+			t:=t
+			
+			list[index] = _Timing_With_Name{
+				t = t,
+				name = key,
+			}
+		}
+
+		by_exclusive :: proc(a,b:_Timing_With_Name) -> bool{
+			return a.exclusive_time > b.exclusive_time
+		}
+
+		slice.sort_by(list, by_exclusive)
+		for value in list{
 			using value
 			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
-			fmt.printf("%16s[% 9d]: %v (%.2f%%", key, hit_count, exclusive_time, percent_ex)
+			fmt.printf("%16s[% 9d]: %v (%.2f%%", name, hit_count, exclusive_time, percent_ex)
 			if inclusive_time - exclusive_time > DELTA {
 				percent_in := 100 * f64(inclusive_time) / f64(total_time)
 				fmt.printf(", %v %.2f%% w/children", inclusive_time, percent_in)
@@ -118,7 +140,7 @@ when !DO_PROFILE {
 				fmt.printf(
 					"\n    ERROR: Call depth is %v \n    Check symmetry of start and stop calls for '%s'",
 					call_depth,
-					key,
+					name,
 				)
 			}
 

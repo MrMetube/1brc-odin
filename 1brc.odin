@@ -11,16 +11,17 @@ import pt "perftime"
 DATA_PATH ::
 	"C:/1brc/data/measurements_10k.txt" when ODIN_DEBUG else "C:/1brc/data/measurements_1M.txt"
 
-Entry_With_Name :: struct {
-	using e: ^Entry,
-	name:    string,
-}
-
 Entry :: struct {
 	// TODO reduce sizes, pack efficiently
 	sum:      i64,
 	count:    u32,
 	min, max: i16,
+}
+
+Entry_With_Name :: struct {
+	e:              ^Entry,
+	name:           string,
+	min, mean, max: f32,
 }
 
 // TODO threading?
@@ -61,10 +62,10 @@ main :: proc() {
 		data = mem.ptr_to_bytes(starting_address, int(file_size))
 	}
 	pt.start("parsing")
-	entries: map[string]Entry
+	entries:  map[string]Entry
+	// line_count: u32
 	last: int
 	line: []u8
-	// line_count: u32
 	for r, data_index in data {
 		if r == '\n' {
 			line = data[last:data_index - 1] // dont include the \r
@@ -79,10 +80,8 @@ main :: proc() {
 				FACTOR :: 10
 				measurement: i16
 				is_negative := measurement_str[0] == '-'
-				if is_negative {
-					measurement_str = measurement_str[1:]
-				}
-				for r in measurement_str {
+				start := is_negative ? 1 : 0
+				for r in measurement_str[start:] {
 					if r != '.' {
 						measurement = FACTOR * measurement + i16(r - '0')
 					}
@@ -125,7 +124,7 @@ main :: proc() {
 	index: int
 	for name, e in entries {
 		defer index += 1
-		
+
 		e := e
 		list[index] = Entry_With_Name {
 			e    = &e,
@@ -139,10 +138,15 @@ main :: proc() {
 	pt.stop()
 	pt.start("calculate mean")
 	for entry in list {
-		mean := f32(entry.sum) / f32(entry.count) * .1
-		min  := f32(entry.min) * .1
-		max  := f32(entry.max) * .1
-		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
+		entry := entry
+		entry.mean = f32(entry.e.sum) / f32(entry.e.count) * .1
+		entry.min = f32(entry.e.min) * .1
+		entry.max = f32(entry.e.max) * .1
+	}
+	pt.stop()
+	pt.start("print")
+	for entry in list {
+		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, entry.min, entry.mean, entry.max)
 	}
 	pt.stop()
 }
