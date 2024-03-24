@@ -15,8 +15,8 @@ Timing :: struct {
 }
 
 _Timing_With_Name :: struct {
-	using t : ^Timing,
-	name: string,
+	using t: ^Timing,
+	name:    string,
 }
 
 MAX_BLOCK_DEPTH :: 1024 * 1024
@@ -35,7 +35,7 @@ when !DO_PROFILE || !DO_TIMING {
 	_make_timing :: proc(byte_count: i64) -> (t: ^Timing) {return nil}
 	_start_timing :: proc(using t: ^Timing, byte_count: i64) {}
 	_stop_timing :: proc(using t: ^Timing) {}
-}else{
+} else {
 	start :: proc(key: string, byte_count: i64 = 0) {
 		using the_timer
 		timeblock_keys[timeblock_cursor] = key
@@ -111,23 +111,23 @@ when !DO_PROFILE {
 		DELTA :: 100
 
 		list := make([]_Timing_With_Name, len(timings))
-		index:int
+		index: int
 		for key, t in timings {
 			defer index += 1
-			t:=t
-			
-			list[index] = _Timing_With_Name{
-				t = t,
+			t := t
+
+			list[index] = _Timing_With_Name {
+				t    = t,
 				name = key,
 			}
 		}
 
-		by_exclusive :: proc(a,b:_Timing_With_Name) -> bool{
+		by_exclusive :: proc(a, b: _Timing_With_Name) -> bool {
 			return a.exclusive_time > b.exclusive_time
 		}
 
 		slice.sort_by(list, by_exclusive)
-		for value in list{
+		for value in list {
 			using value
 			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
 			fmt.printf("%16s[% 9d]: %v (%.2f%%", name, hit_count, exclusive_time, percent_ex)
@@ -151,5 +151,5 @@ when !DO_PROFILE {
 		timings = {}
 	}
 
-	
+
 } // when DO_PROFILE

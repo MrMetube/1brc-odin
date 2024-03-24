@@ -37,9 +37,10 @@ main :: proc() {
 		return strings.compare(a.name, b.name) < 0
 	}
 
-	queue: pq.Priority_Queue(Result_Entry)
-	pq.init(&queue, lexical, pq.default_swap_proc(Result_Entry), len(entries))
+	list := make([]Result_Entry, len(entries))
+	index : int
 	for name in entries {
+		defer index += 1
 		e: ^Entry = &entries[name]
 		value := Result_Entry {
 			mean = f32(e.sum) / f32(e.count) * .1,
@@ -47,9 +48,9 @@ main :: proc() {
 			max  = f32(e.max) * .1,
 			name = name,
 		}
-		pq.push(&queue, value)
+		list[index] = value
 	}
-	list := queue.queue
+	slice.sort_by(list, lexical)
 	pt.stop()
 
 	pt.start("print")
@@ -84,12 +85,12 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 			pt.start("parse measurem.")
 			measurement: i16
 			// the length of the measurement only varies by sign and <10 or >=10
-			num :: #force_inline proc "contextless" (u: u8) -> i16 {return i16(u - '0')}
+			num :: #force_inline proc (u: u8) -> i16 {return i16(u - '0')}
 			switch len(str) {
 			case 3:
 				// positive and < 10
 				measurement = num(str[0]) * 10 + num(str[2])
-			case 4:
+			case 4: 
 				// negative and < 10 or positive and > 10
 				if str[0] == '-' {
 					measurement = -(num(str[1]) * 10 + num(str[3]))
@@ -103,9 +104,7 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 			pt.stop()
 
 			pt.start("update entries")
-			pt.start("string")
 			name_str := string(name)
-			pt.stop()
 			if name_str not_in entries {
 				entries[name_str] = Entry {
 					min   = measurement,
