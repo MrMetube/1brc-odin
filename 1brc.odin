@@ -9,7 +9,9 @@ import "core:sys/windows"
 import pt "perftime"
 
 DATA_PATH ::
-	"C:/1brc/data/measurements_10000.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
+	"C:/1brc/data/measurements_1M.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
+
+OUT := os.stderr when ODIN_DEBUG else os.stdout
 
 Entry_With_Name :: struct{
 	using e : Entry,
@@ -109,10 +111,10 @@ main :: proc() {
 			}
 		}
 		if data_index % 100_000 == 0 {
-			fmt.printf("\t\r%v", data_index)
+			fmt.fprintf(OUT,"\t\r%v", data_index)
 		}
 	}
-	fmt.println()
+	fmt.fprintln(OUT)
 	pt.stop()
 	// TODO sort and calculate mean
 	pt.start("sort")
@@ -137,12 +139,12 @@ main :: proc() {
 		mean := f64( entry.sum / i64(entry.count) / 10 )
 		min := f64(entry.min / 10)
 		max := f64(entry.max / 10)
-		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
+		fmt.fprintf(OUT, "%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
 	}
 	pt.stop()
 }
 
-print_error_and_panic :: proc() {
+print_error_and_panic :: proc(loc:= #caller_location) {
 	error_code := windows.GetLastError()
 	buffer: [1024]u16
 	sl := buffer[:]
@@ -156,5 +158,5 @@ print_error_and_panic :: proc() {
 		nil,
 	)
 	message, _ := windows.utf16_to_utf8(buffer[:length])
-	fmt.panicf("ERROR: %s\n", string(message))
+	fmt.panicf("\nERROR at %v : %s\n",loc, string(message))
 }
