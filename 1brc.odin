@@ -19,8 +19,7 @@ Entry :: struct {
 	min, max: i16,
 }
 
-Entry_With_Name :: struct {
-	e:              ^Entry,
+Result_Entry :: struct {
 	name:           string,
 	min, mean, max: f32,
 }
@@ -31,33 +30,26 @@ main :: proc() {
 
 	data := load_data()
 	// TODO multithreading?
-	entries := create_entries(data)
+	entries := parse_entries(data)
 
 	pt.start("sort")
-	lexical :: proc(a, b: Entry_With_Name) -> bool {
+	lexical :: proc(a, b: Result_Entry) -> bool {
 		return strings.compare(a.name, b.name) < 0
 	}
-	
-	queue : pq.Priority_Queue(Entry_With_Name)
-	pq.init(&queue, lexical, pq.default_swap_proc(Entry_With_Name), len(entries))
+
+	queue: pq.Priority_Queue(Result_Entry)
+	pq.init(&queue, lexical, pq.default_swap_proc(Result_Entry), len(entries))
 	for name in entries {
-		value := Entry_With_Name{
-			e = &entries[name],
+		e: ^Entry = &entries[name]
+		value := Result_Entry {
+			mean = f32(e.sum) / f32(e.count) * .1,
+			min  = f32(e.min) * .1,
+			max  = f32(e.max) * .1,
 			name = name,
 		}
 		pq.push(&queue, value)
 	}
 	list := queue.queue
-	pt.stop()
-
-	pt.start("calculate mean")
-	for _, index in list {
-		entry := &list[index]
-		e := entry.e
-		entry.mean = f32(e.sum) / f32(e.count) * .1
-		entry.min = f32(e.min) * .1
-		entry.max = f32(e.max) * .1
-	}
 	pt.stop()
 
 	pt.start("print")
@@ -67,7 +59,7 @@ main :: proc() {
 	pt.stop()
 }
 
-create_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
+parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 	pt.start("parsing")
 	defer pt.stop()
 
