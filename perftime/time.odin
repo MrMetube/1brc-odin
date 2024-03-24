@@ -30,26 +30,32 @@ Timer :: struct {
 }
 
 when !DO_PROFILE || !DO_TIMING {
-	start :: proc(key: string, byte_count: i64 = 0) {}
-	stop :: proc() {}
-	_make_timing :: proc(byte_count: i64) -> (t: ^Timing) {return nil}
-	_start_timing :: proc(using t: ^Timing, byte_count: i64) {}
-	_stop_timing :: proc(using t: ^Timing) {}
+	start :: proc "contextless" (key: string, byte_count: i64 = 0) {}
+	start_scope :: proc "contextless" (key: string, byte_count: i64 = 0) {}
+	stop :: proc "contextless" () {}
+	_make_timing :: proc "contextless" (byte_count: i64) -> (t: ^Timing) {return nil}
+	_start_timing :: proc "contextless" (using t: ^Timing, byte_count: i64) {}
+	_stop_timing :: proc "contextless" (using t: ^Timing) {}
 } else {
 	start :: proc(key: string, byte_count: i64 = 0) {
 		using the_timer
 		timeblock_keys[timeblock_cursor] = key
 		timeblock_cursor += 1
 
-		previous := timings[key]
-		if previous == nil {
+		previous, ok := timings[key]
+		if !ok {
 			timings[key] = _make_timing(byte_count)
 		} else {
 			_start_timing(previous, byte_count)
 		}
 	}
 
-	stop :: proc() {
+	@(deferred_none=stop)
+	start_scope :: proc(key:string, byte_count:i64=0){
+		start(key, byte_count)
+	}
+
+	stop :: proc "contextless" () {
 		using the_timer
 		timeblock_cursor -= 1
 		last_key := timeblock_keys[timeblock_cursor]
@@ -65,17 +71,16 @@ when !DO_PROFILE || !DO_TIMING {
 		return
 	}
 
-	_start_timing :: proc(using t: ^Timing, byte_count: i64) {
+	_start_timing :: proc "contextless" (using t: ^Timing, byte_count: i64) {
 		proccessed_byte_count += byte_count
 		if call_depth == 0 do old_inclusive_time = inclusive_time
 		call_depth += 1
 
 		the_timer.current = t
 		start = time.now()
-
 	}
 
-	_stop_timing :: proc(using t: ^Timing) {
+	_stop_timing :: proc "contextless" (using t: ^Timing) {
 		elapsed_time := time.diff(start, time.now())
 		the_timer.current = parent
 
@@ -90,13 +95,13 @@ when !DO_PROFILE || !DO_TIMING {
 } // when DO_TIMING
 
 when !DO_PROFILE {
-	begin_profiling :: proc() {}
+	begin_profiling :: proc "contextless" () {}
 	end_profiling :: proc() {}
 } else {
 
 	the_timer: Timer
 
-	begin_profiling :: proc() {
+	begin_profiling :: proc "contextless" () {
 		using the_timer
 		total_start = time.now()
 	}
@@ -111,6 +116,7 @@ when !DO_PROFILE {
 		DELTA :: 100
 
 		list := make([]_Timing_With_Name, len(timings))
+		defer delete_slice(list)
 		index: int
 		for key, t in timings {
 			defer index += 1
