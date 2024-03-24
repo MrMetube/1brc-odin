@@ -11,7 +11,7 @@ import "core:thread"
 import pt "perftime"
 
 DATA_PATH ::
-	"C:/1brc/data/measurements_10k.txt" when ODIN_DEBUG else "C:/1brc/data/measurements_10M.txt"
+	"C:/1brc/data/measurements_10M.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
 
 Entry :: struct {
 	// TODO reduce sizes, pack efficiently
@@ -35,51 +35,48 @@ main :: proc() {
 	defer pt.end_profiling()
 
 	data := load_data()
-	// entries := parse_entries(data)
-	pt.start("parsing")
-	pt.start("split")
-	core_count := os.processor_core_count()
-	parts := split_data(&data, core_count)
+	when ODIN_DEBUG {
+		entries := parse_entries(data)
 
-	threads := make([]^thread.Thread, core_count)
-	arg_list := make([]ParseArgs, core_count)
+	} else {
+		pt.start("parsing")
+		core_count := os.processor_core_count()
+		parts := split_data(&data, core_count)
 
-	parse_entries_args :: proc(a: ^ParseArgs) {
-		result := parse_entries(a.data)
-		a.entries = result
-	}
-	pt.stop()
-	pt.start("run")
-	for _, i in threads {
-		args := &arg_list[i]
-		args.data = parts[i]
-		args.entries = make(map[string]Entry)
+		threads := make([]^thread.Thread, core_count)
+		arg_list := make([]ParseArgs, core_count)
 
-		t := thread.create_and_start_with_poly_data(args, parse_entries_args)
-		threads[i] = t
-	}
-	thread.join_multiple(..threads)
-	pt.stop()
+		parse_entries_args :: proc(a: ^ParseArgs) {
+			result := parse_entries(a.data)
+			a.entries = result
+		}
+		for _, i in threads {
+			args := &arg_list[i]
+			args.data = parts[i]
+			args.entries = make(map[string]Entry)
 
-	pt.start("join")
-	entries: map[string]Entry
-	for a in arg_list {
-		for name, entry in a.entries {
-			if name not_in entries {
-				entries[name] = entry
-			} else {
-				e := &entries[name]
-				e.count += entry.count
-				e.sum += entry.sum
-				e.min = min(entry.min, e.min)
-				e.max = max(entry.max, e.max)
+			t := thread.create_and_start_with_poly_data(args, parse_entries_args)
+			threads[i] = t
+		}
+		thread.join_multiple(..threads)
+
+		entries: map[string]Entry
+		for a in arg_list {
+			for name, entry in a.entries {
+				if name not_in entries {
+					entries[name] = entry
+				} else {
+					e := &entries[name]
+					e.count += entry.count
+					e.sum += entry.sum
+					e.min = min(entry.min, e.min)
+					e.max = max(entry.max, e.max)
+				}
 			}
 		}
+		pt.stop()
 	}
-	pt.stop()
-	pt.stop()
 
-	pt.start("sort")
 	lexical :: proc(a, b: Result_Entry) -> bool {
 		return strings.compare(a.name, b.name) < 0
 	}
@@ -98,10 +95,8 @@ main :: proc() {
 		list[index] = value
 	}
 	slice.sort_by(list, lexical)
-	pt.stop()
 
 	pt.start("print")
-
 	builder, err := strings.builder_make()
 	assert(err == nil, "Failed to make a string builder")
 	for entry in list {
@@ -122,17 +117,17 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 	splits := make([]int, count)
 	stride := len(data) / count
 
-	for i in 1..<count {
+	for i in 1 ..< count {
 		middle := i * stride
 		// fix to end of line
 		for data[middle] != '\n' do middle += 1
 		middle += 1 // after the \n
 		splits[i] = middle
 	}
-	for i in 1..<count{
-		result[i-1] = data[splits[i-1]:splits[i]]
+	for i in 1 ..< count {
+		result[i - 1] = data[splits[i - 1]:splits[i]]
 	}
-	result[count-1] = data[splits[count-1]:]
+	result[count - 1] = data[splits[count - 1]:]
 	return result
 }
 
@@ -153,25 +148,28 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 			name := line[:colon - 1]
 			str := line[colon + 1:]
 
+			when ODIN_DEBUG do pt.start("measurement")
 			measurement: i16
 			// the length of the measurement only varies by sign and <10 or >=10
 			num :: #force_inline proc(u: u8) -> i16 {return i16(u - '0')}
-			switch len(str) {
-			case 3:
+			length := len(str)
+			switch {
+			case length == 3:
 				// positive and < 10
 				measurement = num(str[0]) * 10 + num(str[2])
-			case 4:
-				// negative and < 10 or positive and > 10
-				if str[0] == '-' {
-					measurement = -(num(str[1]) * 10 + num(str[3]))
-				} else {
-					measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
-				}
-			case 5:
+			case length == 4 && str[0] == '-':
+				// negative and < 10 or
+				measurement = -(num(str[1]) * 10 + num(str[3]))
+			case length == 4:
+				// positive and > 10
+				measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
+			case length == 5:
 				// negative and > 10
 				measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
 			}
+			when ODIN_DEBUG do pt.stop()
 
+			when ODIN_DEBUG do pt.start("update entries")
 			name_str := string(name)
 			if name_str not_in entries {
 				entries[name_str] = Entry {
@@ -190,6 +188,7 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 					e.max = measurement
 				}
 			}
+			when ODIN_DEBUG do pt.stop()
 		}
 
 	}
