@@ -14,8 +14,7 @@ DATA_PATH ::
 	"C:/1brc/data/measurements_10M.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
 
 Entry :: struct {
-	// TODO reduce sizes, pack efficiently
-	sum:      i64,
+	sum:      i32,
 	count:    u32,
 	min, max: i16,
 }
@@ -33,11 +32,9 @@ ParseArgs :: struct {
 main :: proc() {
 	pt.begin_profiling()
 	defer pt.end_profiling()
-
 	data := load_data()
 	when ODIN_DEBUG {
 		entries := parse_entries(data)
-
 	} else {
 		pt.start("parsing")
 		core_count := os.processor_core_count()
@@ -76,11 +73,7 @@ main :: proc() {
 		}
 		pt.stop()
 	}
-
-	lexical :: proc(a, b: Result_Entry) -> bool {
-		return strings.compare(a.name, b.name) < 0
-	}
-
+	pt.start("find mean")
 	list := make([]Result_Entry, len(entries))
 	index: int
 	for name in entries {
@@ -94,7 +87,14 @@ main :: proc() {
 		}
 		list[index] = value
 	}
+	pt.stop()
+
+	pt.start("sort")
+	lexical :: proc(a, b: Result_Entry) -> bool {
+		return strings.compare(a.name, b.name) < 0
+	}
 	slice.sort_by(list, lexical)
+	pt.stop()
 
 	pt.start("print")
 	builder, err := strings.builder_make()
@@ -171,17 +171,17 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 
 			when ODIN_DEBUG do pt.start("update entries")
 			name_str := string(name)
-			if name_str not_in entries {
+			e, ok := entries[name_str]
+			if !ok {
 				entries[name_str] = Entry {
 					min   = measurement,
 					max   = measurement,
-					sum   = i64(measurement),
+					sum   = i32(measurement),
 					count = 1,
 				}
 			} else {
-				e := &entries[name_str]
 				e.count += 1
-				e.sum += i64(measurement)
+				e.sum += i32(measurement)
 				if measurement < e.min {
 					e.min = measurement
 				} else if measurement > e.max {
