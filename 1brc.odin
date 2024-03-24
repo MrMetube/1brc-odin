@@ -9,13 +9,11 @@ import "core:sys/windows"
 import pt "perftime"
 
 DATA_PATH ::
-	"C:/1brc/data/measurements_1M.txt" when ODIN_DEBUG else "C:/1brc/data/measurements.txt"
+	"C:/1brc/data/measurements_10k.txt" when ODIN_DEBUG else "C:/1brc/data/measurements_1M.txt"
 
-OUT := os.stderr when ODIN_DEBUG else os.stdout
-
-Entry_With_Name :: struct{
-	using e : Entry,
-	name : string,
+Entry_With_Name :: struct {
+	using e: ^Entry,
+	name:    string,
 }
 
 Entry :: struct {
@@ -66,10 +64,12 @@ main :: proc() {
 	entries: map[string]Entry
 	last: int
 	line: []u8
+	// line_count: u32
 	for r, data_index in data {
 		if r == '\n' {
 			line = data[last:data_index - 1] // dont include the \r
 			last = data_index + 1 // dont include the \n
+			// line_count += 1
 		}
 		for c, index in line {
 			if c == ';' {
@@ -83,15 +83,17 @@ main :: proc() {
 					measurement_str = measurement_str[1:]
 				}
 				for r in measurement_str {
-					if r != '.'{
-						measurement = FACTOR * measurement + i16(r-'0')
+					if r != '.' {
+						measurement = FACTOR * measurement + i16(r - '0')
 					}
 				}
 				if is_negative do measurement *= -1
 				pt.stop()
 
 				pt.start("update entries")
+				pt.start("string")
 				name_str := string(name)
+				pt.stop()
 				if name_str not_in entries {
 					entries[name_str] = Entry {
 						min   = measurement,
@@ -103,48 +105,49 @@ main :: proc() {
 					e := &entries[name_str]
 					e.count += 1
 					e.sum += i64(measurement)
-					// TODO unify, cant be both
-					e.min = min(e.min, measurement)
-					e.max = max(e.max, measurement)
+					if measurement < e.min {
+						e.min = measurement
+					} else if measurement > e.max {
+						e.max = measurement
+					}
 				}
 				pt.stop()
 			}
 		}
-		if data_index % 100_000 == 0 {
-			fmt.fprintf(OUT,"\t\r%v", data_index)
-		}
+		// if line_count % 10_000 == 0 {
+		// 	fmt.printf("\t\r%v", line_count)
+		// }
 	}
-	fmt.fprintln(OUT)
+	// fmt.println()
 	pt.stop()
-	// TODO sort and calculate mean
 	pt.start("sort")
 	list := make([]Entry_With_Name, len(entries))
 	index: int
-	// TODO dont copy
 	for name, e in entries {
-		list[index] = Entry_With_Name{
-			e = e,
+		defer index += 1
+		
+		e := e
+		list[index] = Entry_With_Name {
+			e    = &e,
 			name = name,
 		}
-		index += 1
 	}
-	// TODO undo inverse sorting 
 	lexical :: proc(a, b: Entry_With_Name) -> bool {
-		return strings.compare(a.name, b.name) > 0
+		return strings.compare(a.name, b.name) < 0
 	}
 	slice.sort_by(list, lexical)
 	pt.stop()
 	pt.start("calculate mean")
 	for entry in list {
-		mean := f64( entry.sum / i64(entry.count) / 10 )
-		min := f64(entry.min / 10)
-		max := f64(entry.max / 10)
-		fmt.fprintf(OUT, "%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
+		mean := f32(entry.sum) / f32(entry.count) * .1
+		min  := f32(entry.min) * .1
+		max  := f32(entry.max) * .1
+		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, min, mean, max)
 	}
 	pt.stop()
 }
 
-print_error_and_panic :: proc(loc:= #caller_location) {
+print_error_and_panic :: proc(loc := #caller_location) {
 	error_code := windows.GetLastError()
 	buffer: [1024]u16
 	sl := buffer[:]
@@ -158,5 +161,5 @@ print_error_and_panic :: proc(loc:= #caller_location) {
 		nil,
 	)
 	message, _ := windows.utf16_to_utf8(buffer[:length])
-	fmt.panicf("\nERROR at %v : %s\n",loc, string(message))
+	fmt.panicf("\nERROR at %v : %s\n", loc, string(message))
 }
