@@ -62,7 +62,7 @@ main :: proc() {
 		data = mem.ptr_to_bytes(starting_address, int(file_size))
 	}
 	pt.start("parsing")
-	entries:  map[string]Entry
+	entries: map[string]Entry
 	// line_count: u32
 	last: int
 	line: []u8
@@ -71,51 +71,76 @@ main :: proc() {
 			line = data[last:data_index - 1] // dont include the \r
 			last = data_index + 1 // dont include the \n
 			// line_count += 1
-		}
-		for c, index in line {
-			if c == ';' {
-				name := line[:index - 1]
-				measurement_str := line[index + 1:]
-				pt.start("parse measurem.")
-				FACTOR :: 10
-				measurement: i16
-				is_negative := measurement_str[0] == '-'
-				start := is_negative ? 1 : 0
-				for r in measurement_str[start:] {
-					if r != '.' {
-						measurement = FACTOR * measurement + i16(r - '0')
-					}
+			colon: int
+			for c, index in line {
+				if c == ';' {
+					colon = index
 				}
-				if is_negative do measurement *= -1
-				pt.stop()
-
-				pt.start("update entries")
-				pt.start("string")
-				name_str := string(name)
-				pt.stop()
-				if name_str not_in entries {
-					entries[name_str] = Entry {
-						min   = measurement,
-						max   = measurement,
-						sum   = i64(measurement),
-						count = 1,
-					}
-				} else {
-					e := &entries[name_str]
-					e.count += 1
-					e.sum += i64(measurement)
-					if measurement < e.min {
-						e.min = measurement
-					} else if measurement > e.max {
-						e.max = measurement
-					}
-				}
-				pt.stop()
 			}
+			name := line[:colon - 1]
+			str := line[colon + 1:]
+			pt.start("parse measurem.")
+			FACTOR :: 10
+			measurement: i16
+
+			// the length of the measurement only varies by sign and <10 or >=10
+			// num :: #force_inline proc "contextless" (u: u8) -> i16 {return i16(u - '0')}
+			// switch len(str) {
+			// case 3:
+			// 	// positive and < 10
+			// 	measurement = num(str[0]) * 10 + num(str[2])
+			// case 4:
+			// 	// negative and < 10 or positive and > 10
+			// 	if str[0] == '-' {
+			// 		measurement = -(num(str[1]) * 10 + num(str[3]))
+			// 	} else {
+			// 		measurement = num(str[0]) * 100 + num(str[1]) * 10 + num(str[3])
+			// 	}
+			// case 5:
+			// 	// negative and > 10
+			// 	measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
+
+			// }
+			is_negative := str[0] == '-'
+			start := is_negative ? 1 : 0
+			for i in start..<len(str) {
+				if str[i] == '.' {
+					measurement = FACTOR * measurement + i16(str[i+1] - '0')
+					break
+				}else{
+					measurement = FACTOR * measurement + i16(str[i] - '0')
+				}
+			}
+			if is_negative do measurement *= -1
+			pt.stop()
+
+			pt.start("update entries")
+			pt.start("string")
+			name_str := string(name)
+			pt.stop()
+			if name_str not_in entries {
+				entries[name_str] = Entry {
+					min   = measurement,
+					max   = measurement,
+					sum   = i64(measurement),
+					count = 1,
+				}
+			} else {
+				e := &entries[name_str]
+				e.count += 1
+				e.sum += i64(measurement)
+				if measurement < e.min {
+					e.min = measurement
+				} else if measurement > e.max {
+					e.max = measurement
+				}
+			}
+			pt.stop()
+			// if line_count % 10_000 == 0 {
+			// 	fmt.printf("\t\r%v", line_count)
+			// }
 		}
-		// if line_count % 10_000 == 0 {
-		// 	fmt.printf("\t\r%v", line_count)
-		// }
+
 	}
 	// fmt.println()
 	pt.stop()
@@ -125,9 +150,8 @@ main :: proc() {
 	for name, e in entries {
 		defer index += 1
 
-		e := e
 		list[index] = Entry_With_Name {
-			e    = &e,
+			e    = &entries[name],
 			name = name,
 		}
 	}
@@ -137,11 +161,12 @@ main :: proc() {
 	slice.sort_by(list, lexical)
 	pt.stop()
 	pt.start("calculate mean")
-	for entry in list {
-		entry := entry
-		entry.mean = f32(entry.e.sum) / f32(entry.e.count) * .1
-		entry.min = f32(entry.e.min) * .1
-		entry.max = f32(entry.e.max) * .1
+	for _, index in list {
+		entry := &list[index]
+		e := entry.e
+		entry.mean = f32(e.sum) / f32(e.count) * .1
+		entry.min = f32(e.min) * .1
+		entry.max = f32(e.max) * .1
 	}
 	pt.stop()
 	pt.start("print")
