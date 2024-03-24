@@ -7,6 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sys/windows"
+import "core:thread"
 import pt "perftime"
 
 DATA_PATH ::
@@ -24,13 +25,59 @@ Result_Entry :: struct {
 	min, mean, max: f32,
 }
 
+ParseArgs :: struct {
+	data:    []u8,
+	entries: map[string]Entry,
+}
+
 main :: proc() {
 	pt.begin_profiling()
 	defer pt.end_profiling()
 
 	data := load_data()
-	// TODO multithreading?
-	entries := parse_entries(data)
+	// entries := parse_entries(data)
+	pt.start("parsing")
+	pt.start("split")
+	core_count := os.processor_core_count()
+	parts := split_data(&data, core_count)
+
+	threads := make([]^thread.Thread, core_count)
+	arg_list := make([]ParseArgs, core_count)
+
+	parse_entries_args :: proc(a: ^ParseArgs) {
+		result := parse_entries(a.data)
+		a.entries = result
+	}
+	pt.stop()
+	pt.start("run")
+	for _, i in threads {
+		args := &arg_list[i]
+		args.data = parts[i]
+		args.entries = make(map[string]Entry)
+
+		t := thread.create_and_start_with_poly_data(args, parse_entries_args)
+		threads[i] = t
+	}
+	thread.join_multiple(..threads)
+	pt.stop()
+
+	pt.start("join")
+	entries: map[string]Entry
+	for a in arg_list {
+		for name, entry in a.entries {
+			if name not_in entries {
+				entries[name] = entry
+			} else {
+				e := &entries[name]
+				e.count += entry.count
+				e.sum += entry.sum
+				e.min = min(entry.min, e.min)
+				e.max = max(entry.max, e.max)
+			}
+		}
+	}
+	pt.stop()
+	pt.stop()
 
 	pt.start("sort")
 	lexical :: proc(a, b: Result_Entry) -> bool {
@@ -38,7 +85,7 @@ main :: proc() {
 	}
 
 	list := make([]Result_Entry, len(entries))
-	index : int
+	index: int
 	for name in entries {
 		defer index += 1
 		e: ^Entry = &entries[name]
@@ -54,24 +101,48 @@ main :: proc() {
 	pt.stop()
 
 	pt.start("print")
+
+	builder, err := strings.builder_make()
+	assert(err == nil, "Failed to make a string builder")
 	for entry in list {
-		fmt.printf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, entry.min, entry.mean, entry.max)
+		fmt.sbprint(
+			&builder,
+			fmt.tprintf("%v;%2.1f;%2.1f;%2.1f\n", entry.name, entry.min, entry.mean, entry.max),
+			sep = "",
+		)
 	}
+	output := string(builder.buf[:])
+	fmt.print(output)
+
 	pt.stop()
 }
 
-parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
-	pt.start("parsing")
-	defer pt.stop()
+split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
+	result := make([][]u8, count)
+	splits := make([]int, count)
+	stride := len(data) / count
 
-	// line_count: u32
+	for i in 1..<count {
+		middle := i * stride
+		// fix to end of line
+		for data[middle] != '\n' do middle += 1
+		middle += 1 // after the \n
+		splits[i] = middle
+	}
+	for i in 1..<count{
+		result[i-1] = data[splits[i-1]:splits[i]]
+	}
+	result[count-1] = data[splits[count-1]:]
+	return result
+}
+
+parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 	last: int
 	line: []u8
 	for r, data_index in data {
 		if r == '\n' {
 			line = data[last:data_index - 1] // dont include the \r
 			last = data_index + 1 // dont include the \n
-			// line_count += 1
 			colon: int
 			for c, index in line {
 				if c == ';' {
@@ -82,15 +153,14 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 			name := line[:colon - 1]
 			str := line[colon + 1:]
 
-			pt.start("parse measurem.")
 			measurement: i16
 			// the length of the measurement only varies by sign and <10 or >=10
-			num :: #force_inline proc (u: u8) -> i16 {return i16(u - '0')}
+			num :: #force_inline proc(u: u8) -> i16 {return i16(u - '0')}
 			switch len(str) {
 			case 3:
 				// positive and < 10
 				measurement = num(str[0]) * 10 + num(str[2])
-			case 4: 
+			case 4:
 				// negative and < 10 or positive and > 10
 				if str[0] == '-' {
 					measurement = -(num(str[1]) * 10 + num(str[3]))
@@ -101,9 +171,7 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 				// negative and > 10
 				measurement = -(num(str[1]) * 100 + num(str[2]) * 10 + num(str[4]))
 			}
-			pt.stop()
 
-			pt.start("update entries")
 			name_str := string(name)
 			if name_str not_in entries {
 				entries[name_str] = Entry {
@@ -122,14 +190,9 @@ parse_entries :: proc(data: []u8) -> (entries: map[string]Entry) {
 					e.max = measurement
 				}
 			}
-			pt.stop()
-			// if line_count % 10_000 == 0 {
-			// 	fmt.printf("\t\r%v", line_count)
-			// }
 		}
 
 	}
-	// fmt.println()
 	return entries
 }
 
