@@ -122,11 +122,11 @@ when !DO_PROFILE {
 			}
 		}
 
-		by_exclusive :: proc(a, b: _Timing_With_Name) -> bool {
-			return a.exclusive_time > b.exclusive_time
+		by_inclusive :: proc(a, b: _Timing_With_Name) -> bool {
+			return a.inclusive_time > b.inclusive_time
 		}
 
-		slice.sort_by(list, by_exclusive)
+		slice.sort_by(list, by_inclusive)
 		for value in list {
 			using value
 			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
