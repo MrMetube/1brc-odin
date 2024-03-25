@@ -148,42 +148,37 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 
 parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
 	last: int
-	for r, data_index in data {
-		if r == '\n' {
-			colon: int
-			for i := last; i < data_index; i+= 1 {
-				if data[i] == ';'{
-					colon = i
-					break
-				}
-			}
-			name := data[last:colon-1]
-			temp := data[colon+1:data_index-1]
-			last = data_index + 1 // dont include the \n
- 			
-			temperature: i16 = parse_temperature(temp)
+	for index in 0..<len(data) {
+		if data[index] != '\n' do continue
+		
+		colon := last
+		for data[colon] != ';' do colon += 1
 
-			h := hash.fnv32a(name)
-			e, ok := &entries[h]
-			if !ok {
-				entries[h] = Entry {
-					min   = temperature,
-					max   = temperature,
-					sum   = i32(temperature),
-					count = 1,
-				}
-				names[h] = string(name)
-			} else {
-				e.count += 1
-				e.sum += i32(temperature)
-				if temperature < e.min {
-					e.min = temperature
-				} else if temperature > e.max {
-					e.max = temperature
-				}
+		name := data[last:colon-1]
+		temp := data[colon+1:index-1] // also exclude the \r
+		last = index + 1 // dont include the \n
+		
+		temperature: i16 = parse_temperature(temp)
+
+		h := hash.fnv32a(name)
+		e, ok := &entries[h]
+		if !ok {
+			entries[h] = Entry {
+				min   = temperature,
+				max   = temperature,
+				sum   = i32(temperature),
+				count = 1,
+			}
+			names[h] = string(name)
+		} else {
+			e.count += 1
+			e.sum += i32(temperature)
+			if temperature < e.min {
+				e.min = temperature
+			} else if temperature > e.max {
+				e.max = temperature
 			}
 		}
-
 	}
 	return entries, names
 }
