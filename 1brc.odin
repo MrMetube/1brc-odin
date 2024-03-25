@@ -39,7 +39,8 @@ one_billion_row_challenge :: proc() {
 	pt.begin_profiling()
 	defer pt.end_profiling()
 
-	data := load_data()
+	data, file_mapping_handle := load_data()
+	
 	when false && ODIN_DEBUG {
 		pt.start("parsing")
 		entries, names := parse_entries(data)
@@ -85,6 +86,8 @@ one_billion_row_challenge :: proc() {
 		}
 		pt.stop()
 	}
+	windows.UnmapViewOfFile(file_mapping_handle)
+	
 	pt.start("find mean")
 	list := make([]Result_Entry, len(entries))
 	defer delete(list)
@@ -125,25 +128,6 @@ one_billion_row_challenge :: proc() {
 	fmt.print(output)
 
 	pt.stop()
-}
-
-split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
-	result := make([][]u8, count)
-	splits := make([]int, count, context.temp_allocator)
-	stride := len(data) / count
-
-	for i in 1 ..< count {
-		middle := i * stride
-		// fix to end of line
-		for data[middle] != '\n' do middle += 1
-		middle += 1 // after the \n
-		splits[i] = middle
-	}
-	for i in 1 ..< count {
-		result[i - 1] = data[splits[i - 1]:splits[i]]
-	}
-	result[count - 1] = data[splits[count - 1]:]
-	return result
 }
 
 parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
@@ -208,7 +192,26 @@ parse_temperature :: proc "contextless" (s: []u8) -> (temperature: i16) {
 	return
 }
 
-load_data :: proc() -> (data: []u8) {
+split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
+	result := make([][]u8, count)
+	splits := make([]int, count, context.temp_allocator)
+	stride := len(data) / count
+
+	for i in 1 ..< count {
+		middle := i * stride
+		// fix to end of line
+		for data[middle] != '\n' do middle += 1
+		middle += 1 // after the \n
+		splits[i] = middle
+	}
+	for i in 1 ..< count {
+		result[i - 1] = data[splits[i - 1]:splits[i]]
+	}
+	result[count - 1] = data[splits[count - 1]:]
+	return result
+}
+
+load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
 	pt.start_scope(#procedure)
 
 	win_path := windows.utf8_to_utf16(DATA_PATH)
@@ -223,21 +226,23 @@ load_data :: proc() -> (data: []u8) {
 	)
 	if file_handle == nil do print_error_and_panic()
 
-	file_mapping_handle := windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
+	file_mapping_handle = windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
 	if file_mapping_handle == nil do print_error_and_panic()
 
 	file_size: windows.LARGE_INTEGER
 	windows.GetFileSizeEx(file_handle, &file_size)
 	starting_address: ^u8 = auto_cast windows.MapViewOfFile(
 		file_mapping_handle,
-		windows.FILE_MAP_READ,
+		windows.FILE_MAP_READ ,
 		0,
 		0,
 		0,
 	)
 	if starting_address == nil do print_error_and_panic()
 
-	return mem.ptr_to_bytes(starting_address, int(file_size))
+	windows.CloseHandle(file_handle)
+
+	return mem.ptr_to_bytes(starting_address, int(file_size)), file_mapping_handle
 }
 
 print_error_and_panic :: proc(loc := #caller_location) {
