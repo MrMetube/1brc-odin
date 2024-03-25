@@ -31,7 +31,11 @@ ParseArgs :: struct {
 	names:   map[u32]string,
 }
 
-main :: proc() {
+main :: proc(){
+	one_billion_row_challenge()
+}
+
+one_billion_row_challenge :: proc() {
 	pt.begin_profiling()
 	defer pt.end_profiling()
 
@@ -144,22 +148,19 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 
 parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
 	last: int
-	line: []u8 = ---
-
 	for r, data_index in data {
 		if r == '\n' {
-			line = data[last:data_index - 1] // dont include the \r
-			last = data_index + 1 // dont include the \n
 			colon: int
-			for c, index in line {
-				if c == ';' {
-					colon = index
+			for i := last; i < data_index; i+= 1 {
+				if data[i] == ';'{
+					colon = i
 					break
 				}
 			}
-			name := line[:colon - 1]
-			temp := line[colon + 1:]
-
+			name := data[last:colon-1]
+			temp := data[colon+1:data_index-1]
+			last = data_index + 1 // dont include the \n
+ 			
 			temperature: i16 = parse_temperature(temp)
 
 			h := hash.fnv32a(name)
@@ -205,8 +206,7 @@ parse_temperature :: proc "contextless" (s: []u8) -> (temperature: i16) {
 	case length == 4:
 		// positive and > 10
 		temperature = make_num(s[0], s[1], s[3])
-	case:
-		// length == 5
+	case length == 5:
 		// negative and > 10
 		temperature = -make_num(s[1], s[2], s[4])
 	}
