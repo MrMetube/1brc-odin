@@ -1,6 +1,6 @@
 \.vscode
 \build
-\data
+\data\*.txt
 
 *.exe
 *.pdb
