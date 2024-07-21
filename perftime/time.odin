@@ -22,53 +22,55 @@ _Timing_With_Name :: struct {
 MAX_BLOCK_DEPTH :: 1024 * 1024
 
 Timer :: struct {
-	current:                ^Timing,
-	timings:                map[string]^Timing,
-	total_start, total_end: time.Time,
-	timeblock_keys:         [MAX_BLOCK_DEPTH]string,
-	timeblock_cursor:       int,
+	current:   ^Timing,
+	timings:   map[string]^Timing,
+	total:     struct {
+		start, end: time.Time,
+	},
+	timeblock: struct {
+		keys:   [MAX_BLOCK_DEPTH]string,
+		cursor: int,
+	},
 }
 
 when !DO_PROFILE || !DO_TIMING {
-	start :: proc "contextless" (key: string, byte_count: i64 = 0) {}
-	start_scope :: proc "contextless" (key: string, byte_count: i64 = 0) {}
-	stop :: proc "contextless" () {}
-	_make_timing :: proc "contextless" (byte_count: i64) -> (t: ^Timing) {return nil}
-	_start_timing :: proc "contextless" (using t: ^Timing, byte_count: i64) {}
-	_stop_timing :: proc "contextless" (using t: ^Timing) {}
+
+	start :: proc(key: string, byte_count: i64 = 0) {}
+	start_scope :: proc(key: string, byte_count: i64 = 0) {}
+	stop :: proc() {}
+	_start_timing :: proc(using t: ^Timing, byte_count: i64) {}
+	_stop_timing :: proc(using t: ^Timing) {}
+
 } else {
+
 	start :: proc(key: string, byte_count: i64 = 0) {
 		using the_timer
-		timeblock_keys[timeblock_cursor] = key
-		timeblock_cursor += 1
+		timeblock.keys[timeblock.cursor] = key
+		timeblock.cursor += 1
 
 		previous, ok := timings[key]
 		if !ok {
-			timings[key] = _make_timing(byte_count)
+			t := new(Timing)
+			t.parent = the_timer.current
+			_start_timing(t, byte_count)
+			timings[key] = t
 		} else {
 			_start_timing(previous, byte_count)
 		}
 	}
 
-	@(deferred_none=stop)
-	start_scope :: proc(key:string, byte_count:i64=0){
+	@(deferred_none = stop)
+	start_scope :: proc(key: string, byte_count: i64 = 0) {
 		start(key, byte_count)
 	}
 
 	stop :: proc "contextless" () {
 		using the_timer
-		timeblock_cursor -= 1
-		last_key := timeblock_keys[timeblock_cursor]
+		timeblock.cursor -= 1
+		last_key := timeblock.keys[timeblock.cursor]
 		t := timings[last_key]
 
 		_stop_timing(t)
-	}
-
-	_make_timing :: proc(byte_count: i64) -> (t: ^Timing) {
-		t = new(Timing)
-		t.parent = the_timer.current
-		_start_timing(t, byte_count)
-		return
 	}
 
 	_start_timing :: proc "contextless" (using t: ^Timing, byte_count: i64) {
@@ -92,25 +94,28 @@ when !DO_PROFILE || !DO_TIMING {
 
 		hit_count += 1
 	}
+
 } // when DO_TIMING
 
 when !DO_PROFILE {
+
 	begin_profiling :: proc "contextless" () {}
 	end_profiling :: proc() {}
+
 } else {
 
 	the_timer: Timer
 
 	begin_profiling :: proc "contextless" () {
 		using the_timer
-		total_start = time.now()
+		total.start = time.now()
 	}
 
 	end_profiling :: proc() {
 		using the_timer
-		total_end = time.now()
+		total.end = time.now()
 
-		total_time := time.diff(total_start, total_end)
+		total_time := time.diff(total.start, total.end)
 		fmt.printf("%16s[% 9s]: %v \n", "Total", "hit count", total_time)
 
 		DELTA :: 100
