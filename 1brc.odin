@@ -134,21 +134,8 @@ parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
         for index^ < len(data) && data[index^] != target do index^ += 1
     }
     
-    last, index: int
-    for index < len(data) {
-        skip_to_value(&index, ';', data)
-        if index >= len(data) do break
-        
-        colon := index
-        skip_to_value(&index, '\r', data)
-        
-        name  := data[last:colon-1]
-        temp := data[colon+1:index]
-        last = index + len("\r\n") // dont include the newline
-        
-        temperature := parse_temperature(temp)
-        
-        h := hash.fnv32a(name)
+	insert_entry :: proc(entries: ^Mapping, names: ^map[u32]string, temperature: i16, name: []u8){
+		h := hash.fnv32a(name)
         if e, ok := &entries[h]; !ok {
             entries[h] = Entry {
                 min   = temperature,
@@ -166,6 +153,20 @@ parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
                 e.max = temperature
             }
         }
+	}
+
+    last, index: int
+	skip_to_value(&index, ';', data)
+    for index < len(data) {
+        colon :=  index
+        skip_to_value(&index, '\r', data)
+        
+        name1, temperature1 := data[last:colon-1], parse_temperature(data[colon+1:index])
+        last = index + len("\r\n") // dont include the newline
+        
+        insert_entry(&entries, &names, temperature1, name1)
+		
+		skip_to_value(&index, ';', data)
     }
     return entries, names
 }
