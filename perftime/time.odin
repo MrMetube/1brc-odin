@@ -4,8 +4,11 @@ import "core:fmt"
 import "core:slice"
 import "core:time"
 
-DO_PROFILE :: true
-DO_TIMING :: true
+_ :: fmt
+_ :: slice
+
+DO_PROFILE :: !true
+DO_TIMING  :: !true
 
 Timing :: struct {
 	start:                                              time.Time,
@@ -35,11 +38,11 @@ Timer :: struct {
 
 when !DO_PROFILE || !DO_TIMING {
 
-	start :: proc(key: string, byte_count: i64 = 0) {}
-	start_scope :: proc(key: string, byte_count: i64 = 0) {}
-	stop :: proc() {}
+	start         :: proc(key: string, byte_count: i64 = 0)  {}
+	start_scope   :: proc(key: string, byte_count: i64 = 0)  {}
+	stop          :: proc()                                  {}
 	_start_timing :: proc(using t: ^Timing, byte_count: i64) {}
-	_stop_timing :: proc(using t: ^Timing) {}
+	_stop_timing  :: proc(using t: ^Timing)                  {}
 
 } else {
 
@@ -64,7 +67,7 @@ when !DO_PROFILE || !DO_TIMING {
 		start(key, byte_count)
 	}
 
-	stop :: proc "contextless" () {
+	stop :: proc () {
 		using the_timer
 		timeblock.cursor -= 1
 		last_key := timeblock.keys[timeblock.cursor]
@@ -73,7 +76,7 @@ when !DO_PROFILE || !DO_TIMING {
 		_stop_timing(t)
 	}
 
-	_start_timing :: proc "contextless" (using t: ^Timing, byte_count: i64) {
+	_start_timing :: proc (using t: ^Timing, byte_count: i64) {
 		proccessed_byte_count += byte_count
 		if call_depth == 0 do old_inclusive_time = inclusive_time
 		call_depth += 1
@@ -82,7 +85,7 @@ when !DO_PROFILE || !DO_TIMING {
 		start = time.now()
 	}
 
-	_stop_timing :: proc "contextless" (using t: ^Timing) {
+	_stop_timing :: proc (using t: ^Timing) {
 		elapsed_time := time.diff(start, time.now())
 		the_timer.current = parent
 
@@ -99,14 +102,14 @@ when !DO_PROFILE || !DO_TIMING {
 
 when !DO_PROFILE {
 
-	begin_profiling :: proc "contextless" () {}
+	begin_profiling :: proc () {}
 	end_profiling :: proc() {}
 
 } else {
 
 	the_timer: Timer
 
-	begin_profiling :: proc "contextless" () {
+	begin_profiling :: proc () {
 		using the_timer
 		total.start = time.now()
 	}
@@ -116,7 +119,7 @@ when !DO_PROFILE {
 		total.end = time.now()
 
 		total_time := time.diff(total.start, total.end)
-		fmt.printf("%16s[% 9s]: %v \n", "Total", "hit count", total_time)
+		fmt.printf("%20s[% 9s]: %v \n", "Total", "hit count", total_time)
 
 		DELTA :: 100
 
@@ -141,7 +144,7 @@ when !DO_PROFILE {
 		for value in list {
 			using value
 			percent_ex := 100 * f64(exclusive_time) / f64(total_time)
-			fmt.printf("%16s[% 9d]: %v (%.2f%%", name, hit_count, exclusive_time, percent_ex)
+			fmt.printf("%20s[% 9d]: %v (%.2f%%", name, hit_count, exclusive_time, percent_ex)
 			if inclusive_time - exclusive_time > DELTA {
 				percent_in := 100 * f64(inclusive_time) / f64(total_time)
 				fmt.printf(", %v %.2f%% w/children", inclusive_time, percent_in)

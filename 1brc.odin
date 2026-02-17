@@ -1,7 +1,7 @@
 package main
 
+import "base:intrinsics"
 import "core:fmt"
-import "core:hash"
 import "core:mem"
 import "core:os"
 import "core:slice"
@@ -10,9 +10,12 @@ import "core:sys/windows"
 import "core:thread"
 import pt "perftime"
 
-DATA_PATH :: "./data/measurements_1B.txt"
+Multithreaded :: true
+
+DATA_PATH :: "./data/measurements_100k.txt"
 
 Entry :: struct {
+    name:  string,
     sum:      i32, // probably from -10M to 10M
     count:    u32, // at most 1 billion but probably at most 100k
     min, max: i16, // fixed point numbers from -999 to 999
@@ -22,182 +25,225 @@ Result_Entry :: struct {
     name:           string,
     min, mean, max: f32,
 }
-Mapping :: map[u32]Entry
+Mapping :: map[u32] Entry
 
 ParseArgs :: struct {
-    data:    []u8,
+    thread_index: u32,
+    data:    [] u8,
     entries: Mapping,
-    names:   map[u32]string,
 }
 
-main :: proc(){
-    one_billion_row_challenge()
-}
-
-one_billion_row_challenge :: proc() {
+main :: proc() {
+    spall_buffer_size :: 10 * Megabyte
+    init_spall(spall_buffer_size)
+    spall_proc()
+    
     pt.begin_profiling()
     defer pt.end_profiling()
     
     data, file_mapping_handle := load_data()
     
-    core_count := os.processor_core_count()
+    core_count := Multithreaded ? os.processor_core_count() : 1
     parts := split_data(&data, core_count)
     
-    pt.start("parsing")
+    spall_begin("parsing")
     threads  := make([]^thread.Thread, core_count)
     arg_list := make([]ParseArgs, core_count)
     
-    parse_entries_args :: proc(a: ^ParseArgs) { a.entries, a.names = parse_entries(a.data) }
+    parse_entries_args :: proc(a: ^ParseArgs) {
+        init_spall_thread(a.thread_index, spall_buffer_size)
+        a.entries = parse_entries(a.data)
+    }
 
     for _, i in threads {
         args := &arg_list[i]
         args.data = parts[i]
-        
+        args.thread_index = cast(u32) i + 1
         threads[i] = thread.create_and_start_with_poly_data(args, parse_entries_args)
     }
     thread.join_multiple(..threads)
+    spall_end()
+    
+    spall_begin("merging")
     entries: Mapping
-    names: map[u32]string
+    reserve(&entries, 10000)
     for a in arg_list {
-        for hash, entry in a.entries {
-            if hash not_in entries {
-                entries[hash] = entry
+        for name, entry in a.entries {
+            if name not_in entries {
+                entries[name] = entry
             } else {
-                e := &entries[hash]
+                e := &entries[name]
                 e.count += entry.count
                 e.sum += entry.sum
                 e.min = min(entry.min, e.min)
                 e.max = max(entry.max, e.max)
             }
         }
-        for hash, name in a.names {
-            names[hash] = name
-        }
     }
-    pt.stop()
+    spall_end()
     windows.UnmapViewOfFile(file_mapping_handle)
     
-    pt.start("other")
+    spall_begin("prepare results")
     list := make([]Result_Entry, len(entries))
     index: int
-    for hash in entries {
+    for _, &e in entries {
         defer index += 1
-        e := &entries[hash]
         value := Result_Entry {
             mean = f32(e.sum) / f32(e.count) * .1,
             min  = f32(e.min) * .1,
             max  = f32(e.max) * .1,
-            name = names[hash],
+            name = e.name,
         }
         list[index] = value
     }
-    pt.stop()
+    spall_end()
     
-    pt.start("other")
-    lexical :: proc(a, b: Result_Entry) -> bool { return a.name > b.name }
+    spall_begin("sort")
+    lexical :: proc(a, b: Result_Entry) -> bool { return a.name < b.name }
     slice.sort_by(list, lexical)
-    pt.stop()
+    spall_end()
     
-    pt.start("print")
-    builder, err := strings.builder_make()
-    assert(err == nil, "Failed to make a string builder")
+    spall_begin("print")
+    builder, _ := strings.builder_make()
     for entry in list {
         fmt.sbprintfln(
             &builder,
             "%20s; %2.1f; %+2.1f; %2.1f", entry.name, entry.min, entry.mean, entry.max,
         )
     }
-    output := string(builder.buf[:])
-    fmt.print(output)
     
-    pt.stop()
+    output := strings.to_string(builder)
+    fmt.print(output)
+    fmt.println(len(list))
+    spall_end()
 }
 
-parse_entries :: proc(data: []u8) -> (entries: Mapping, names: map[u32]string) {
-    skip_to_value :: proc(index:^int, target: u8, data: []u8) {
-        // based on https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
-        has_zero_byte :: proc (v:u32) -> b8 {
-            MASK:u32: 0x7F7F7F7F
-            return ~((((v & MASK) + MASK) | v) | MASK) != 0
-        }
-        
-        has_value :: proc (v:u32, n:u32) -> b8 {
-            return has_zero_byte( v ~ (~u32(0) / 255 * n) )    
-        }
-        for {
-			STRIDE :: size_of(u32)
-            if index^+STRIDE >= len(data) do break
-            x := transmute(^u32) &data[index^]
-            if has_value(x^, u32(target)) do break
-            index^ += STRIDE
-        }
-        for index^ < len(data) && data[index^] != target do index^ += 1
-    }
+parse_entries :: proc(data: []u8) -> (entries: Mapping) {
+    reserve(&entries, 10000)
+    spall_proc()
     
-	insert_entry :: proc(entries: ^Mapping, names: ^map[u32]string, temperature: i16, name: []u8){
-		h := hash.fnv32a(name)
-        if e, ok := &entries[h]; !ok {
-            entries[h] = Entry {
-                min   = temperature,
-                max   = temperature,
-                sum   = i32(temperature),
-                count = 1,
-            }
-            names[h] = string(name)
-        } else {
-            e.count += 1
-            e.sum += i32(temperature)
-            if temperature < e.min {
-                e.min = temperature
-            } else if temperature > e.max {
-                e.max = temperature
-            }
-        }
-	}
-
     last, index: int
-	skip_to_value(&index, ';', data)
-    for index < len(data) {
-        colon :=  index
+    for {
+        skip_to_value(&index, ';', data)
+        if index >= len(data) do break
+        colon := index
         skip_to_value(&index, '\r', data)
         
-        name1, temperature1 := data[last:colon-1], parse_temperature(data[colon+1:index])
-        last = index + len("\r\n") // dont include the newline
+        name        := cast(string) data[last:colon]
+        temperature := parse_temperature(data[colon+1:index])
+        insert_entry(&entries, temperature, name)
         
-        insert_entry(&entries, &names, temperature1, name1)
-		
-		skip_to_value(&index, ';', data)
-    }
-    return entries, names
-}
-
-parse_temperature :: proc(s: []u8) -> (temperature: i16) {
-    // the length of the temperature only varies by sign and <10 or >=10
-    make_num_hundreds :: proc(hundreds, teens, units: u8) -> i16 {
-        return i16(hundreds) * 100 + make_num_teens(teens, units)
-    }
-    make_num_teens :: proc(teens, units: u8) -> i16 {
-        return i16(teens) * 10 + i16(units)
+        last = index + len("\r\n") // dont include the newline
     }
     
-    switch len(s) {
-    case 3:
-        // positive and < 10
-        temperature = make_num_teens(s[0] - '0', s[2] - '0')
-    case 4:
-        // negative and < 10 or positive and > 11
-        temperature = s[0] == '-' ? -make_num_teens(s[1] - '0', s[3] - '0') : make_num_hundreds(s[0] - '0', s[1] - '0', s[3] - '0')
-    case 5:
-        // negative and > 10
-        temperature = -make_num_hundreds(s[1] - '0', s[2] - '0', s[4] - '0')
-    case: unreachable()
+    return entries
+}
+
+skip_to_value :: proc(index: ^int, $target: u32, data: []u8) #no_bounds_check {
+    local_index := index^
+    for local_index < len(data) && cast(u32) data[local_index] != target do local_index += 1
+    index ^= local_index
+}
+
+// Usage: 
+// small : []u8 = ...
+// big, mask, mask_end := masked_view(small, u32)
+// for value, index in big {
+//     if index == len(big)-1 do mask = mask_end
+//     masked := value & mask
+//     // only use the masked value
+// }
+masked_view :: proc (small_data: [] $S, $L: typeid) -> (big_data: [] L, mask_begin, mask_end: L) {
+    size_factor := size_of(L) / size_of(S)
+    
+    big_len := len(small_data) / size_factor
+    big_rest := len(small_data) % size_factor
+    if big_rest != 0 do big_len += 1
+    big_data = slice_from_parts(L, raw_data(small_data), big_len)
+    
+    _all_bits: [size_of(L)] u8 = ~ cast(u8) 0
+    all_bits := transmute(L) _all_bits
+    mask_begin = all_bits
+    mask_end   = all_bits
+    XL :: u128be when intrinsics.type_is_endian_big(L) else u128le
+    if big_rest != 0 {
+        s_bits :: size_of(S) * 8
+        shift := cast(XL) (size_factor - big_rest) * s_bits
+        when intrinsics.type_is_endian_big(L) {
+            mask_end = cast(L) (all_bits << shift)
+        } else {
+            mask_end = cast(L) (all_bits >> shift)
+        }
     }
-    return
+    
+    return big_data, mask_begin, mask_end
+}
+
+insert_entry :: proc(entries: ^Mapping, temperature: i16, name: string){
+    hash_name :: proc (data: [] u8, seed: u32 = 5381) -> (hash: u32) {
+        spall_proc()
+        when !true {
+            for b in data {
+                hash = hash * 33 + cast(u32) b
+            }
+        } else {
+            small : []u8 = data
+            big, mask, mask_end := masked_view(small, u32be)
+            for value, index in big {
+                if index == len(big)-1 do mask = mask_end
+                masked := value & mask
+                
+                hash = hash * 33 + transmute(u32) masked
+            }
+        }
+        
+        return hash
+    }
+    
+    hashed := hash_name(transmute([] u8) name)
+    
+    spall_begin("map entry")
+    _, e, just_inserted, _ := map_entry(entries, hashed)
+    spall_end()
+    
+    e.sum   += cast(i32) temperature
+    e.count += 1
+    if just_inserted {
+        e.min  = temperature
+        e.max  = temperature
+        e.name = name
+    } else {
+        if temperature < e.min {
+            e.min = temperature
+        } else if temperature > e.max {
+            e.max = temperature
+        }
+    }
+}
+	
+parse_temperature :: proc(s: [] u8) -> (temperature: i16) #no_bounds_check {
+    spall_proc()
+    count := cast(i16) len(s)
+    sign  := s[0] == '-' ? cast(i16) -1 : 1
+    
+    
+    // hi := 1 * count + 0.5 * sign - 4.5   for all cases but count = 5
+    hi := count == 5 ? 1 : (2 * count + sign - 9) / 2
+    
+    // the length of the temperature only varies by sign and <10 or >=10
+    // 3 -> positive and <10
+    // 4 -> negative and <10 or positive and >11
+    // 5 -> negative and >10
+    
+    hundreds := hi == -1 ? 0 : cast(i16) s[hi] - '0'
+    tens     := cast(i16) s[count - 3] - '0'
+    units    := cast(i16) s[count - 1] - '0'
+    temperature = sign * (hundreds * 100 + tens * 10 + units)
+    
+    return temperature
 }
 
 split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
-	pt.start_scope("other")
-
     result := make([][]u8, count)
     splits := make([]int, count, context.temp_allocator)
     stride := len(data) / count
@@ -217,11 +263,8 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 }
 
 load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
-	pt.start_scope("other")
-    
-    win_path := windows.utf8_to_utf16(DATA_PATH)
     file_handle := windows.CreateFileW(
-        &win_path[0],
+        DATA_PATH,
         windows.GENERIC_READ,
         windows.FILE_SHARE_READ,
         nil,
@@ -251,18 +294,6 @@ load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
 }
 
 print_error_and_panic :: proc(loc := #caller_location) {
-    error_code := windows.GetLastError()
-    buffer: [1024]u16
-    sl := buffer[:]
-    length := windows.FormatMessageW(
-        windows.FORMAT_MESSAGE_FROM_SYSTEM,
-        nil,
-        error_code,
-        0,
-        raw_data(sl),
-        1024,
-        nil,
-    )
-    message, _ := windows.utf16_to_utf8(buffer[:length])
-    fmt.panicf("\nERROR at %v : %s\n", loc, string(message))
+    message := os.error_string(os.get_last_error())
+    fmt.panicf("\nERROR at %v : %s\n", loc, message)
 }
