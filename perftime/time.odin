@@ -8,7 +8,7 @@ import "core:time"
 _ :: fmt
 _ :: slice
 
-DO_PROFILE :: !true
+DO_PROFILE :: true
 DO_TIMING  :: !true
 
 Timing :: struct {
