@@ -4,14 +4,13 @@ package main
 import "base:intrinsics"
 
 import "core:fmt"
-import info "core:sys/info"
 import "core:slice"
 import "core:strings"
 import "core:strconv"
+import "core:sys/info"
 import "core:sys/windows"
 import "core:thread"
-
-import pt "perftime"
+import "core:time"
 
 Multithreaded :: true
 
@@ -43,16 +42,22 @@ main :: proc() {
     init_spall(spall_buffer_size)
     spall_proc()
     
-    pt.begin_profiling()
-    defer pt.end_profiling()
-    
+    work_start := time.now()
     data, file_mapping_handle := load_data()
+    
+    read_start := time.now()
+    sum : u8 = 123
+    for v in data {
+        sum ~= v
+    }
+    fmt.printf("%v\r                  \n", sum)
+    read_duration := time.since(read_start)
     
     cpu_core_count, _, _ := info.cpu_core_count()
     core_count := Multithreaded ? cpu_core_count : 1
     parts := split_data(&data, core_count)
     
-    threads  := make([] ^thread.Thread, core_count)
+    threads  := make([] ^thread.Thread, core_count-1)
     arg_list := make([] ParseArgs,      core_count)
     
     spall_begin("reserve entries")
@@ -66,17 +71,21 @@ main :: proc() {
     worker_thread :: proc (a: ^ParseArgs) {
         init_spall_thread(a.thread_index, spall_buffer_size)
         parse_entries(&a.entries, a.data)
-        spall_flush()
+        if a.thread_index != 0 { spall_flush() }
     }
     
-    spall_begin("spawn threads")
-    for _, i in threads {
-        args := &arg_list[i]
+    for &args, i in arg_list {
         args.data = parts[i]
-        args.thread_index = cast(u32) i + 1
-        threads[i] = thread.create_and_start_with_poly_data(args, worker_thread)
+        args.thread_index = cast(u32) i
+    }
+    spall_begin("spawn threads")
+    for &t, i in threads {
+        args := &arg_list[i+1]
+        t = thread.create_and_start_with_poly_data(args, worker_thread)
     }
     spall_end()
+    
+    worker_thread(&arg_list[0])
     
     for t in threads {
         for !thread.is_done(t) {
@@ -161,6 +170,13 @@ main :: proc() {
     fmt.print(output)
     spall_end()
     spall_end()
+    
+    gigabytes := cast(f64) len(data) / cast(f64) 1 * Gigabyte
+    
+    total_duration := time.since(work_start) - read_duration
+    fmt.printf("\n")
+    fmt.printf("Read: %v - %.3f Gb/s\n", read_duration,  gigabytes / (cast(f64) read_duration)  / (cast(f64) time.Second))
+    fmt.printf("Work: %v - %.3f Gb/s\n", total_duration, gigabytes / (cast(f64) total_duration) / (cast(f64) time.Second))
 }
 
 ////////////////////////////////////////////////
@@ -211,8 +227,6 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 ////////////////////////////////////////////////
 
 parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
-    spall_proc()
-    
     N :: LaneWidth
     names:  [dynamic; N] string
     bytes:  lane_i64
@@ -220,10 +234,10 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
 
     Scan_Width :: 64
     scan_lane :: #simd [Scan_Width] u8
-    next_chunk: int
-    chunk_start: int
+    scan_mask :: #simd [Scan_Width] u32
+    semicolon_chunk, line_chunk: int
     Bits :: bit_set[0..<Scan_Width]
-    semicolon_bits, line_bits, both_bits: Bits
+    semicolon_bits, line_bits: Bits
     
     last, index: int
     loop: for {
@@ -231,35 +245,25 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
         
         spall_begin("collect lines")
         #no_bounds_check for !(should_break || len(names) == cap(names)) {
-            semicolon, line_end := -1, -1
-            for line_end == -1 {
-                for both_bits == {} && next_chunk < len(data) {
-                    chunk_start = next_chunk
-                    valid_count := min(Scan_Width, len(data) - chunk_start)
-                    valid_lanes := lanes_less(intrinsics.simd_indices(scan_lane), cast(scan_lane) valid_count)
-                    chunk := intrinsics.simd_masked_load(&data[chunk_start], cast(scan_lane) 0, valid_lanes)
-                    
-                    semicolon_bits = intrinsics.simd_extract_msbs(lanes_equal(chunk, cast(scan_lane) ';'))
-                    line_bits      = intrinsics.simd_extract_msbs(lanes_equal(chunk, cast(scan_lane) '\r'))
-                    both_bits  = semicolon_bits + line_bits
-                    next_chunk += Scan_Width
-                }
-                
-                if both_bits == {} { unreachable() }
-                
-                if semicolon == -1 && semicolon_bits != {} {
-                    offset := cast(int) intrinsics.count_trailing_zeros(transmute(u64) semicolon_bits)
-                    semicolon_bits -= { offset }
-                    both_bits      -= { offset }
-                    semicolon = chunk_start + offset
-                }
-                if semicolon != -1 && line_bits != {} {
-                    offset := cast(int) intrinsics.count_trailing_zeros(transmute(u64) line_bits)
-                    line_bits -= { offset }
-                    both_bits -= { offset }
-                    line_end = chunk_start + offset
-                }
+            for semicolon_bits == {} {
+                valid_lanes     := lanes_less(cast(scan_mask) semicolon_chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
+                chunk           := lanes_masked_load(&data[semicolon_chunk], cast(scan_lane) 0, valid_lanes)
+                semicolon_bits   = lanes_extract_most_significant_bits(lanes_equal(chunk, cast(scan_lane) ';'))
+                semicolon_chunk += Scan_Width
             }
+            semicolon_offset := cast(int) count_trailing_zeros(transmute(u64) semicolon_bits)
+            semicolon_bits   -= { semicolon_offset }
+            semicolon        := semicolon_chunk - Scan_Width + semicolon_offset
+            
+            for line_bits == {} {
+                valid_lanes := lanes_less(cast(scan_mask) line_chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
+                chunk       := lanes_masked_load(&data[line_chunk], cast(scan_lane) 0, valid_lanes)
+                line_bits    = lanes_extract_most_significant_bits(lanes_equal(chunk, cast(scan_lane) '\r'))
+                line_chunk  += Scan_Width
+            }
+            line_offset := cast(int) count_trailing_zeros(transmute(u64) line_bits)
+            line_bits   -= { line_offset }
+            line_end    := line_chunk - Scan_Width + line_offset
             
             text  := (cast(^i64) &data[semicolon+1])^
             count := cast(u64) (line_end - semicolon - 1)
@@ -387,18 +391,22 @@ lane_false :: cast(lane_u32) 0
 true_lane  :: cast(u32) 0xffff_ffff
 lane_true  :: cast(lane_u32) true_lane
 
-lane_offset :: lane_u32{0, 1, 2, 3, 4, 5, 6, 7} when LaneWidth == 8 else ( lane_u32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15} when LaneWidth == 16 else lane_u32{0, 1, 2, 3})
+lane_offset :: lane_u32{0, 1, 2, 3, 4, 5, 6, 7} when LaneWidth == 8 else ( lane_u32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15} when LaneWidth == 16 else ( lane_u32{0, 1, 2, 3} when LaneWidth == 4 else lane_u32 { 0, 1 }))
 
-shift_right   :: intrinsics.simd_shr_masked
-lanes_extract :: intrinsics.simd_extract
-lanes_replace :: intrinsics.simd_replace
-lanes_equal   :: intrinsics.simd_lanes_eq
-lanes_less    :: intrinsics.simd_lanes_lt
-lanes_greater :: intrinsics.simd_lanes_gt
-lanes_rotate  :: intrinsics.simd_lanes_rotate_right
-lanes_any     :: intrinsics.simd_reduce_any
-lanes_all     :: intrinsics.simd_reduce_all
-lanes_select  :: intrinsics.simd_select
-lanes_min     :: intrinsics.simd_min
-lanes_max     :: intrinsics.simd_max
-lanes_unaligned_load :: intrinsics.unaligned_load
+shift_right                         :: intrinsics.simd_shr_masked
+lanes_extract                       :: intrinsics.simd_extract
+lanes_replace                       :: intrinsics.simd_replace
+lanes_equal                         :: intrinsics.simd_lanes_eq
+lanes_less                          :: intrinsics.simd_lanes_lt
+lanes_greater                       :: intrinsics.simd_lanes_gt
+lanes_rotate                        :: intrinsics.simd_lanes_rotate_right
+lanes_any                           :: intrinsics.simd_reduce_any
+lanes_all                           :: intrinsics.simd_reduce_all
+lanes_select                        :: intrinsics.simd_select
+lanes_min                           :: intrinsics.simd_min
+lanes_max                           :: intrinsics.simd_max
+lanes_indices                       :: intrinsics.simd_indices
+lanes_masked_load                   :: intrinsics.simd_masked_load
+lanes_extract_most_significant_bits :: intrinsics.simd_extract_msbs
+
+count_trailing_zeros :: intrinsics.count_trailing_zeros
