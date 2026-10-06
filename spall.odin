@@ -38,7 +38,7 @@ init_spall :: proc (backing_buffer_size := 10 * Megabyte, location := #caller_lo
 }
 @(deferred_none = delete_spall_thread)
 @(disabled=!SpallEnabled)
-init_spall_thread :: proc (thread_index := cast(u32) context.user_index, backing_buffer_size := 10 * Megabyte, location := #caller_location, ) {
+init_spall_thread :: proc (thread_index := cast(u32) context.user_index, backing_buffer_size := 10 * Megabyte, location := #caller_location) {
     make(&backing_buffer, backing_buffer_size)
     spall_buffer = spall.buffer_create(backing_buffer, thread_index)
     spall_begin(location.procedure)

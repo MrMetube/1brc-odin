@@ -4,9 +4,6 @@ package main
 import "base:intrinsics"
 
 import "core:fmt"
-import "core:io"
-import "core:mem"
-import "core:os"
 import info "core:sys/info"
 import "core:slice"
 import "core:strings"
@@ -39,8 +36,10 @@ ParseArgs :: struct {
     entries: [LaneWidth] Mapping,
 }
 
+////////////////////////////////////////////////
+
 main :: proc() {
-    spall_buffer_size :: 1000 * Megabyte
+    spall_buffer_size :: 40 * Kilobyte
     init_spall(spall_buffer_size)
     spall_proc()
     
@@ -67,6 +66,7 @@ main :: proc() {
     worker_thread :: proc (a: ^ParseArgs) {
         init_spall_thread(a.thread_index, spall_buffer_size)
         parse_entries(&a.entries, a.data)
+        spall_flush()
     }
     
     spall_begin("spawn threads")
@@ -132,7 +132,6 @@ main :: proc() {
     builder_buffer := make([] u8, 1*Megabyte)
     builder := strings.builder_from_slice(builder_buffer)
     
-    writer := strings.to_writer(&builder)
     float_buffer: [384] u8
     for entry in list {
         if !true {
@@ -141,7 +140,7 @@ main :: proc() {
             mean := strconv.write_float(float_buffer[:], cast(f64) entry.mean, 'f', 1, 32)
             max  := strconv.write_float(float_buffer[:], cast(f64) entry.max,  'f', 1, 32)
             
-            for i in strings.rune_count(entry.name) ..< 20 { append(&builder.buf, ' ') }
+            for _ in strings.rune_count(entry.name) ..< 20 { append(&builder.buf, ' ') }
             append(&builder.buf, entry.name)
             append(&builder.buf, "; ")
             append(&builder.buf, min[1:]) // skip sign
@@ -159,11 +158,57 @@ main :: proc() {
     
     spall_begin("print")
     output := strings.to_string(builder)
-    io.write_string(os.to_writer(os.stdout), output)
+    fmt.print(output)
     spall_end()
     spall_end()
 }
 
+////////////////////////////////////////////////
+
+load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
+    file_handle := windows.CreateFileW(DATA_PATH, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, nil)
+    if file_handle == nil do print_error_and_panic()
+    defer windows.CloseHandle(file_handle)
+    
+    print_error_and_panic :: proc (loc := #caller_location) {
+        fmt.panicf("\nERROR at %v\n", loc)
+    }
+    
+    file_mapping_handle = windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
+    if file_mapping_handle == nil do print_error_and_panic()
+    
+    file_size: windows.LARGE_INTEGER
+    windows.GetFileSizeEx(file_handle, &file_size)
+    
+    starting_address := cast([^] u8) windows.MapViewOfFile(file_mapping_handle, windows.FILE_MAP_READ , 0, 0, 0)
+    if starting_address == nil do print_error_and_panic()
+    
+    result := starting_address[:file_size]
+    return result, file_mapping_handle
+}
+
+split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
+    spall_proc()
+    
+    result := make([][]u8, count)
+    splits := make([]int, count, context.temp_allocator)
+    stride := len(data) / count
+    
+    for i in 1 ..< count {
+        middle := i * stride
+        // fix to end of line
+        for data[middle] != '\n' do middle += 1
+        middle += 1 // after the \n
+        splits[i] = middle
+    }
+    for i in 1 ..< count {
+        result[i - 1] = data[splits[i - 1]:splits[i]]
+    }
+    result[count - 1] = data[splits[count - 1]:]
+    return result
+}
+
+////////////////////////////////////////////////
 
 parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
     spall_proc()
@@ -172,49 +217,85 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
     names:  [dynamic; N] string
     bytes:  lane_i64
     counts: lane_u64
+
+    Scan_Width :: 64
+    scan_lane :: #simd [Scan_Width] u8
+    next_chunk: int
+    chunk_start: int
+    Bits :: bit_set[0..<Scan_Width]
+    semicolon_bits, line_bits, both_bits: Bits
     
     last, index: int
-    lane_index: int
-    #no_bounds_check loop: for {
-        for data[index] != ';'  { index += 1 }
-        colon := index
-        for data[index] != '\r' { index += 1 }
+    loop: for {
+        should_break: bool
         
-        text  := (cast(^i64) &data[colon+1])^
-        count := cast(u64) (index - colon - 1)
-        name  := cast(string) data[last:colon]
+        spall_begin("collect lines")
+        #no_bounds_check for !(should_break || len(names) == cap(names)) {
+            semicolon, line_end := -1, -1
+            for line_end == -1 {
+                for both_bits == {} && next_chunk < len(data) {
+                    chunk_start = next_chunk
+                    valid_count := min(Scan_Width, len(data) - chunk_start)
+                    valid_lanes := lanes_less(intrinsics.simd_indices(scan_lane), cast(scan_lane) valid_count)
+                    chunk := intrinsics.simd_masked_load(&data[chunk_start], cast(scan_lane) 0, valid_lanes)
+                    
+                    semicolon_bits = intrinsics.simd_extract_msbs(lanes_equal(chunk, cast(scan_lane) ';'))
+                    line_bits      = intrinsics.simd_extract_msbs(lanes_equal(chunk, cast(scan_lane) '\r'))
+                    both_bits  = semicolon_bits + line_bits
+                    next_chunk += Scan_Width
+                }
+                
+                if both_bits == {} { unreachable() }
+                
+                if semicolon == -1 && semicolon_bits != {} {
+                    offset := cast(int) intrinsics.count_trailing_zeros(transmute(u64) semicolon_bits)
+                    semicolon_bits -= { offset }
+                    both_bits      -= { offset }
+                    semicolon = chunk_start + offset
+                }
+                if semicolon != -1 && line_bits != {} {
+                    offset := cast(int) intrinsics.count_trailing_zeros(transmute(u64) line_bits)
+                    line_bits -= { offset }
+                    both_bits -= { offset }
+                    line_end = chunk_start + offset
+                }
+            }
+            
+            text  := (cast(^i64) &data[semicolon+1])^
+            count := cast(u64) (line_end - semicolon - 1)
+            name  := cast(string) data[last:semicolon]
+            
+            bytes  = lanes_replace(bytes,  len(names), text)
+            counts = lanes_replace(counts, len(names), count)
+            append(&names, name)
+            
+            index = line_end + len("\r\n")
+            should_break = index >= len(data)
+            last = index
+        }
+        spall_end()
         
-        index += len("\r\n") // dont include the newline
-        should_break := index >= len(data)
-        last = index
-        
-        bytes  = lanes_replace(bytes,  len(names), text)
-        counts = lanes_replace(counts, len(names), count)
-        append(&names, name)
-        
-        if len(names) == cap(names) || should_break {
+        {
             temperatures := parse_temperatures(bytes, counts)
             
             es: Lane(Entry)
             just_inserteds: lane_u32
             
+            spall_begin("hash and map insertion")
             for name, lane in names {
-                spall_begin("hashing")
                 seed: u32 : 5381
                 name_bytes := transmute([] u8) name
                 hash := seed
                 #no_bounds_check for b in name_bytes {
                     hash = hash * 33 + cast(u32) b
                 }
-                spall_end()
                 
-                spall_begin("map insertion")
                 _, e, just_inserted, _ := map_entry(&entries[lane], hash)
-                spall_end()
                 
                 es.p           = lanes_replace(es.p,           lane, cast(umm) e)
                 just_inserteds = lanes_replace(just_inserteds, lane, just_inserted ? true_lane : 0)
             }
+            spall_end()
             
             spall_begin("entry update")
             sum   := lane_member(es, "sum")
@@ -248,14 +329,13 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
     }
 }
 
-parse_temperature :: proc (s: pmm, count: u32) -> i16 #no_bounds_check {
+parse_temperatures :: proc (bytes: lane_i64, counts: lane_u64) -> lane_i16 #no_bounds_check {
     spall_proc()
-    
     // the length of the temperature only varies by sign and <10 or >=10
     // 3 -> positive and <10
     // 4 -> negative and <10 or positive and >11
     // 5 -> negative and >10
-    bytes := (cast(^i64) s)^
+    bytes := bytes
     bytes &= 0x000000_0f_0f_0f_0f_0f
     //              |          x1 x0 - hundreds
     //              |       t0 t1 t1 - tens
@@ -267,16 +347,18 @@ parse_temperature :: proc (s: pmm, count: u32) -> i16 #no_bounds_check {
     // false |    true   | -0+1 = -1
     //  true |   false   | -1+0 = -1
     //  true |    true   | -1+1 =  0
-    minus := (bytes & 0xff) == ('-' & 0x0f)
-    xx := count - cast(u32) (minus ~ (count == 5)) 
+    minus := lanes_equal(bytes & 0xff, '-' & 0x0f)
+    shifts := counts - cast(lane_u64) (minus ~ lanes_equal(counts, 5)) & 1
     
-    temperature := 100 * ((bytes >> (8 * xx    - 32)) & 0xff)
-    temperature +=  10 * ((bytes >> (8 * count - 24)) & 0xff)
-    temperature +=       ((bytes >> (8 * count -  8)) & 0xff)
-    temperature *= cast(i64) (minus) * -2 + 1
+    temperature := 100 * (shift_right(bytes, (8 * shifts - 32)) & 0xff)
+    temperature +=  10 * (shift_right(bytes, (8 * counts - 24)) & 0xff)
+    temperature +=       (shift_right(bytes, (8 * counts -  8)) & 0xff)
+    temperature *= (cast(lane_i64) minus & 1) * -2 + 1
     
-    return cast(i16) temperature
+    return cast(lane_i16) temperature
 }
+
+////////////////////////////////////////////////
 
 LaneWidth :: 8
 
@@ -315,94 +397,8 @@ lanes_less    :: intrinsics.simd_lanes_lt
 lanes_greater :: intrinsics.simd_lanes_gt
 lanes_rotate  :: intrinsics.simd_lanes_rotate_right
 lanes_any     :: intrinsics.simd_reduce_any
+lanes_all     :: intrinsics.simd_reduce_all
 lanes_select  :: intrinsics.simd_select
 lanes_min     :: intrinsics.simd_min
 lanes_max     :: intrinsics.simd_max
-
-parse_temperatures :: proc (bytes: lane_i64, counts: lane_u64) -> lane_i16 #no_bounds_check {
-    spall_proc()
-    // the length of the temperature only varies by sign and <10 or >=10
-    // 3 -> positive and <10
-    // 4 -> negative and <10 or positive and >11
-    // 5 -> negative and >10
-    bytes := bytes
-    bytes &= 0x000000_0f_0f_0f_0f_0f
-    //              |          x1 x0 - hundreds
-    //              |       t0 t1 t1 - tens
-    //              | u0 u1 u2       - units
-
-    // hundreds_shift 8 * { -1, 0, 1 }
-    // minus | count = 5 | -minus + count=5
-    // false |   false   | -0+0 =  0
-    // false |    true   | -0+1 = -1
-    //  true |   false   | -1+0 = -1
-    //  true |    true   | -1+1 =  0
-    minus := lanes_equal(bytes & 0xff, '-' & 0x0f)
-    shifts := counts - cast(lane_u64) (minus ~ lanes_equal(counts, 5)) & 1
-    
-    temperature := 100 * (shift_right(bytes, (8 * shifts - 32)) & 0xff)
-    temperature +=  10 * (shift_right(bytes, (8 * counts - 24)) & 0xff)
-    temperature +=       (shift_right(bytes, (8 * counts -  8)) & 0xff)
-    temperature *= (cast(lane_i64) minus & 1) * -2 + 1
-    
-    return cast(lane_i16) temperature
-}
-
-
-////////////////////////////////////////////////
-
-split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
-    spall_proc()
-    
-    result := make([][]u8, count)
-    splits := make([]int, count, context.temp_allocator)
-    stride := len(data) / count
-    
-    for i in 1 ..< count {
-        middle := i * stride
-        // fix to end of line
-        for data[middle] != '\n' do middle += 1
-        middle += 1 // after the \n
-        splits[i] = middle
-    }
-    for i in 1 ..< count {
-        result[i - 1] = data[splits[i - 1]:splits[i]]
-    }
-    result[count - 1] = data[splits[count - 1]:]
-    return result
-}
-
-load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
-    file_handle := windows.CreateFileW(
-        DATA_PATH,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ,
-        nil,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
-        nil,
-    )
-    if file_handle == nil do print_error_and_panic()
-    
-    file_mapping_handle = windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
-    if file_mapping_handle == nil do print_error_and_panic()
-    
-    file_size: windows.LARGE_INTEGER
-    windows.GetFileSizeEx(file_handle, &file_size)
-    starting_address: ^u8 = auto_cast windows.MapViewOfFile(
-        file_mapping_handle,
-        windows.FILE_MAP_READ ,
-        0,
-        0,
-        0,
-    )
-    if starting_address == nil do print_error_and_panic()
-    
-    windows.CloseHandle(file_handle)
-    
-    return mem.ptr_to_bytes(starting_address, int(file_size)), file_mapping_handle
-}
-
-print_error_and_panic :: proc (loc := #caller_location) {
-    fmt.panicf("\nERROR at %v\n", loc)
-}
+lanes_unaligned_load :: intrinsics.unaligned_load
