@@ -19,11 +19,11 @@ Lane_Slice :: struct ($E: typeid) {
     len: lane_u32,
 }
 
-Lane_String :: Lane_Slice(u8)
+Lane_String :: Lane(struct {data: pmm, len: int})
 
 ////////////////////////////////////////////////
 
-to_lane :: proc { to_lane_slice, to_lane_array, to_lane_wide }
+to_lane :: proc { to_lane_slice, to_lane_array, to_lane_wide, to_lane_fixed }
 to_lane_slice :: proc (slice: $S/ [] $T) -> Lane_Slice(T) {
     result: Lane_Slice(T)
     result.p   = cast(lane_umm) raw_data(slice)
@@ -37,6 +37,10 @@ to_lane_array :: proc (array: $S/ [dynamic ]$T) -> Lane_Slice(T) {
 to_lane_wide :: proc (array: ^[LaneWidth] $T) -> Lane(T) {
     slice  := to_lane(array[:])
     result := lane_index_scalar(slice, lane_offset)
+    return result
+}
+to_lane_fixed :: proc (array: ^[dynamic; LaneWidth] $T) -> Lane(T) {
+    result  := to_lane_wide(cast(^[LaneWidth] T) array)
     return result
 }
 
@@ -99,6 +103,8 @@ lane_slice_start_end :: proc (slice: Lane_Slice($T), start, end: lane_u32, calle
 @(private="file") Field  :: intrinsics.type_field_type
 @(private="file") Offset :: offset_of_by_string
 
+@(private="file") less_than :: simd.lanes_lt
+
 // @todo(viktor): once OLS doesn't crash anymore we can remove the parameter
 lane_member :: proc { lane_member_1, lane_member_2 }
 lane_member_1 :: proc (lane: Lane($T), $member: string) -> Lane(Field(T, member)) where Has(T, member) {
@@ -136,6 +142,7 @@ lane_gather_index :: proc { lane_gather_index_no_mask, lane_gather_index_mask }
 lane_gather_v     :: proc { lane_gather_v_no_mask,     lane_gather_v_mask     }
 
 lane_gather_no_mask :: proc (lane: Lane($T)) -> #simd [LaneWidth] T {
+    // @speed just a load?
     result := lane_gather_mask(lane, lane_true, T{})
     return result
 }
@@ -160,7 +167,7 @@ lane_gather_index_mask :: proc (lane: Lane_Slice($T), index: lane_u32, mask: lan
 }
 
 lane_gather_v_no_mask :: proc (lane: Lane($T/ [$N] $E)) -> [N] #simd [LaneWidth] E {
-    result: [N] #simd [LaneWidth] E
+    result: [N] #simd [LaneWidth] E = ---
     #no_bounds_check #unroll for channel_index in cast(u32) 0..<N {
         index := lane_index(lane, channel_index)
         result[channel_index] = lane_gather(index)
@@ -168,7 +175,7 @@ lane_gather_v_no_mask :: proc (lane: Lane($T/ [$N] $E)) -> [N] #simd [LaneWidth]
     return result
 }
 lane_gather_v_mask :: proc (lane: Lane($T/ [$N] $E), mask: lane_u32, default: [N] #simd [LaneWidth] E) -> [N] #simd [LaneWidth] E {
-    result: [N] #simd [LaneWidth] E
+    result: [N] #simd [LaneWidth] E = ---
     #no_bounds_check #unroll for channel_index in cast(u32) 0..<N {
         index := lane_index(lane, channel_index)
         result[channel_index] = lane_gather(index, mask, default[channel_index])

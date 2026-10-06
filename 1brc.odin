@@ -317,13 +317,14 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
             lane_scatter(min, lanes_min(temperatures, old_min), write_mask)
             lane_scatter(max, lanes_max(temperatures, old_max), write_mask)
             
-            // @todo
-            for lane in 0..<len(names) {
-                if lanes_extract(just_inserteds, lane) != 0 {
-                    e := lane_extract(es, lane)
-                    e.name = names[lane]
-                }
-            }
+            source_name := cast(Lane_String) to_lane(&names)
+            entry_name  := cast(Lane_String) lane_member(es, "name")
+            source_data  := lane_member(source_name, "data")
+            source_len   := lane_member(source_name, "len")
+            entry_data   := lane_member(entry_name,  "data")
+            entry_len    := lane_member(entry_name,  "len")
+            lane_scatter_mask(entry_data, lane_gather_mask(source_data, just_inserteds, cast(lane_pmm) nil), just_inserteds)
+            lane_scatter_mask(entry_len,  lane_gather_mask(source_len,  just_inserteds, cast(lane_int) 0),   just_inserteds)
             spall_end()
             
             clear(&names)
