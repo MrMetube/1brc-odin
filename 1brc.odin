@@ -14,7 +14,7 @@ import "core:time"
 
 Multithreaded :: true
 
-DATA_PATH :: "./data/measurements_10M.txt"
+DATA_PATH :: "./data/measurements_100M.txt"
 
 Entry :: struct {
     sum:   i32, // probably from -10M to 10M
@@ -242,51 +242,65 @@ parse_entries :: proc (entries: ^Mapping, data: [] u8) {
     
     Scan_Width : i64 : 64
     Bits :: bit_set[0..<Scan_Width; i64]
-    semicolon_chunk, line_chunk: i64
-    semicolon_bits,  line_bits: bit_set[0..<Scan_Width; i64]
+    semicolon_chunk: i64
+    semicolon_bits:  Bits
+    
+    scan_lane :: #simd [Scan_Width] u8
+    scan_mask :: #simd [Scan_Width] u32
+    
+    target, zero :: cast(scan_lane) ';', cast(scan_lane) 0
+    data_len := cast(scan_mask) len(data)
     
     last, index: i64
     loop: for {
         should_break: bool
         
-        spall_begin("collect lines")
-        #no_bounds_check for !(should_break || len(names) == cap(names)) {
-            read_bits_in_chunks :: proc (data: [] u8, bits: Bits, chunk: i64, $target_byte: u8) -> (Bits, i64, i64) {
-                scan_lane :: #simd [Scan_Width] u8
-                scan_mask :: #simd [Scan_Width] u32
-                
-                bits  := bits
-                chunk := chunk
-                target, zero := cast(scan_lane) target_byte, cast(scan_lane) 0
-                
-                data_len := cast(scan_mask) len(data)
-                for bits == {} {
-                    read_mask := lanes_less(cast(scan_mask) chunk + lanes_indices(scan_mask), data_len)
-                    read      := lanes_masked_load(&data[chunk], zero, read_mask)
-                    bits       = transmute(Bits) lanes_extract_most_significant_bits(lanes_equal(read, target))
-                    chunk     += Scan_Width
+        spall_begin("collect lines") 
+        // collect lines      1_250_003 hits
+        // collect iteration 10_000_000 hits
+        // collect reads      2_645_220 hits
+        #no_bounds_check for !should_break && len(names) != cap(names) {
+            semicolon: i64
+            {
+                for semicolon_bits == {} {
+                    read_mask       := lanes_less(cast(scan_mask) semicolon_chunk + lanes_indices(scan_mask), data_len)
+                    read            := lanes_masked_load(&data[semicolon_chunk], zero, read_mask)
+                    semicolon_bits   = transmute(Bits) lanes_extract_most_significant_bits(lanes_equal(read, target))
+                    semicolon_chunk += Scan_Width
                 }
                 
-                lowest_set_bit := count_trailing_zeros(transmute(i64) bits)
-                bits   -= { lowest_set_bit }
-                result := chunk - Scan_Width + lowest_set_bit
-                
-                return bits, chunk, result
+                lowest_set_bit := count_trailing_zeros(transmute(i64) semicolon_bits)
+                semicolon_bits -= { lowest_set_bit }
+                semicolon       = semicolon_chunk - Scan_Width + lowest_set_bit
             }
             
-            semicolon, line_end: i64
-            semicolon_bits, semicolon_chunk, semicolon = read_bits_in_chunks(data, semicolon_bits, semicolon_chunk, ';')
-            line_bits,      line_chunk,      line_end  = read_bits_in_chunks(data, line_bits,      line_chunk,      '\r')
-            
-            text  := (cast(^i64) &data[semicolon+1])^
-            count := cast(u64) (line_end - semicolon - 1)
+            // Temperature bytes start at temp[0]. The bytes before the final ".digit" are:
+            //        temp[0] temp[1] temp[2] .. | count
+            // d.d       d      '.'      d    .. |  3
+            // dd.d      d       d      '.'   .. |  4
+            // -d.d     '-'      d      '.'   .. |  4
+            // -dd.d    '-'      d       d    .. |  5
+            //
+            // ASCII bit 4 distinguishes '.' from a digit:
+            // '.'      = 0b0010_1110
+            // '0'..'9' = 0b0011_xxxx
+            // count = 2 + bit4(temp[1]) * 2 + bit4(temp[2])
+            // if the second byte is a number then its and if the third byte is a number
+            temp  := (cast(^i64) &data[semicolon+1])^
+            //    ((temp >> (8+4))      & 1) * 2
+            //  = ((temp >> (8+4))      & 1) << 1
+            //  =  (temp >> (8+4)) << 1 & 2
+            //  =  (temp >> (8+4-1))    & 2
+            //  =  (temp >> (8+3))      & 2
+            //  =  (temp >> 11)         & 2
+            count := 2 + cast(u64) ((temp >> 11) & 2) + cast(u64) ((temp >> 20) & 1)
             name  := cast(string) data[last:semicolon]
             
-            bytes  = lanes_replace(bytes,  len(names), text)
+            bytes  = lanes_replace(bytes,  len(names), temp)
             counts = lanes_replace(counts, len(names), count)
             append(&names, name)
             
-            index = line_end + len("\r\n")
+            index = semicolon + 1 + cast(i64) count + len("\r\n")
             should_break = index >= cast(i64) len(data)
             last = index
         }

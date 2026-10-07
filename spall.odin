@@ -5,7 +5,7 @@ package main
 import "core:prof/spall"
 import "core:time"
 
-SpallDisabled :: !true
+SpallDisabled :: !false
 
 spall_ctx: spall.Context
 @(thread_local) spall_buffer: spall.Buffer
