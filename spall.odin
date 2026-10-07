@@ -64,8 +64,8 @@ delete_spall_thread :: proc (thread_index: u32) {
 ////////////////////////////////////////////////
 
 @(deferred_none = spall_end)
-@(disabled=SpallDisabled) spall_proc :: proc (name: string = "", location := #caller_location) {
-    spall_begin(name == "" ? location.procedure : name, location)
+@(disabled=SpallDisabled) spall_proc :: proc (location := #caller_location) {
+    spall_begin(location.procedure, location)
 }
 
 @(deferred_none = spall_end)

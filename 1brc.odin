@@ -20,12 +20,14 @@ Entry :: struct {
     name:  string,
     sum:      i32, // probably from -10M to 10M
     count:    u32, // at most 1 billion but probably at most 100k
-    min, max: i16, // fixed point numbers from -999 to 999
+    // fixed point numbers from [-999 to 999]
+    min: i16,
+    max: i16, 
 }
 
 Result_Entry :: struct {
     name:           string,
-    min, mean, max: f32,
+    min, mean, max: f64,
 }
 Mapping :: map[u32] Entry
 
@@ -45,13 +47,17 @@ main :: proc() {
     work_start := time.now()
     data, file_mapping_handle := load_data()
     
-    read_start := time.now()
+    cold_read_start := time.now()
     sum : u8 = 123
-    for v in data {
-        sum ~= v
-    }
+    for v in data { sum ~= v}
     fmt.printf("%v\r                  \n", sum)
-    read_duration := time.since(read_start)
+    cold_read_duration := time.since(cold_read_start)
+    
+    warm_read_start := time.now()
+    sum = 123
+    for v in data { sum ~= v }
+    fmt.printf("%v\r                  \n", sum)
+    warm_read_duration := time.since(warm_read_start)
     
     cpu_core_count, _, _ := info.cpu_core_count()
     core_count := Multithreaded ? cpu_core_count : 1
@@ -87,12 +93,7 @@ main :: proc() {
     
     worker_thread(&arg_list[0])
     
-    for t in threads {
-        for !thread.is_done(t) {
-            intrinsics.cpu_relax()
-        }
-    }
-    // thread.join_multiple(..threads)
+    thread.join_multiple(..threads)
     
     spall_begin("scalar")
     
@@ -123,9 +124,9 @@ main :: proc() {
     for _, &e in entries {
         defer index += 1
         value := Result_Entry {
-            mean = cast(f32) (cast(f64) e.sum / cast(f64) e.count) * .1,
-            min  = cast(f32) e.min * .1,
-            max  = cast(f32) e.max * .1,
+            mean = (cast(f64) e.sum / cast(f64) e.count) * .1,
+            min  = cast(f64) e.min * .1,
+            max  = cast(f64) e.max * .1,
             name = e.name,
         }
         list[index] = value
@@ -145,9 +146,9 @@ main :: proc() {
     for entry in list {
         if !true {
             // 2.0ms
-            min  := strconv.write_float(float_buffer[:], cast(f64) entry.min,  'f', 1, 32)
-            mean := strconv.write_float(float_buffer[:], cast(f64) entry.mean, 'f', 1, 32)
-            max  := strconv.write_float(float_buffer[:], cast(f64) entry.max,  'f', 1, 32)
+            min  := strconv.write_float(float_buffer[:], cast(f64) entry.min,  'f', 1, size_of(entry.min)  * 8)
+            mean := strconv.write_float(float_buffer[:], cast(f64) entry.mean, 'f', 1, size_of(entry.mean) * 8)
+            max  := strconv.write_float(float_buffer[:], cast(f64) entry.max,  'f', 1, size_of(entry.max)  * 8)
             
             for _ in strings.rune_count(entry.name) ..< 20 { append(&builder.buf, ' ') }
             append(&builder.buf, entry.name)
@@ -173,10 +174,11 @@ main :: proc() {
     
     gigabytes := cast(f64) len(data) / cast(f64) 1 * Gigabyte
     
-    total_duration := time.since(work_start) - read_duration
+    total_duration := time.since(work_start) - cold_read_duration - warm_read_duration
     fmt.printf("\n")
-    fmt.printf("Read: %v - %.3f Gb/s\n", read_duration,  gigabytes / (cast(f64) read_duration)  / (cast(f64) time.Second))
-    fmt.printf("Work: %v - %.3f Gb/s\n", total_duration, gigabytes / (cast(f64) total_duration) / (cast(f64) time.Second))
+    fmt.printf("Read:cold: %v - %.3f Gb/s\n", cold_read_duration,  gigabytes / (cast(f64) cold_read_duration)  / (cast(f64) time.Second))
+    fmt.printf("Read:warm: %v - %.3f Gb/s\n", warm_read_duration,  gigabytes / (cast(f64) warm_read_duration)  / (cast(f64) time.Second))
+    fmt.printf("Work:      %v - %.3f Gb/s\n", total_duration,      gigabytes / (cast(f64) total_duration)      / (cast(f64) time.Second))
 }
 
 ////////////////////////////////////////////////
@@ -227,43 +229,49 @@ split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
 ////////////////////////////////////////////////
 
 parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
+    spall_proc()
+    
     N :: LaneWidth
     names:  [dynamic; N] string
     bytes:  lane_i64
     counts: lane_u64
-
-    Scan_Width :: 64
-    scan_lane :: #simd [Scan_Width] u8
-    scan_mask :: #simd [Scan_Width] u32
-    semicolon_chunk, line_chunk: int
-    Bits :: bit_set[0..<Scan_Width]
-    semicolon_bits, line_bits: Bits
     
-    last, index: int
+    Scan_Width : i64 : 64
+    Bits :: bit_set[0..<Scan_Width; i64]
+    semicolon_chunk, line_chunk: i64
+    semicolon_bits,  line_bits: bit_set[0..<Scan_Width; i64]
+    
+    last, index: i64
     loop: for {
         should_break: bool
         
         spall_begin("collect lines")
         #no_bounds_check for !(should_break || len(names) == cap(names)) {
-            for semicolon_bits == {} {
-                valid_lanes     := lanes_less(cast(scan_mask) semicolon_chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
-                chunk           := lanes_masked_load(&data[semicolon_chunk], cast(scan_lane) 0, valid_lanes)
-                semicolon_bits   = lanes_extract_most_significant_bits(lanes_equal(chunk, cast(scan_lane) ';'))
-                semicolon_chunk += Scan_Width
+            read_bits_in_chunks :: proc (data: [] u8, bits: Bits, chunk: i64, $target_byte: u8) -> (Bits, i64, i64) {
+                scan_lane :: #simd [Scan_Width] u8
+                scan_mask :: #simd [Scan_Width] u32
+                
+                bits   := bits
+                chunk  := chunk
+                target, zero := cast(scan_lane) target_byte, cast(scan_lane) 0
+                
+                for bits == {} {
+                    read_mask := lanes_less(cast(scan_mask) chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
+                    read      := lanes_masked_load(&data[chunk], zero, read_mask)
+                    bits       = transmute(Bits) lanes_extract_most_significant_bits(lanes_equal(read, target))
+                    chunk     += Scan_Width
+                }
+                
+                lowest_set_bit := count_trailing_zeros(transmute(i64) bits)
+                bits   -= { lowest_set_bit }
+                result := chunk - Scan_Width + lowest_set_bit
+                
+                return bits, chunk, result
             }
-            semicolon_offset := cast(int) count_trailing_zeros(transmute(u64) semicolon_bits)
-            semicolon_bits   -= { semicolon_offset }
-            semicolon        := semicolon_chunk - Scan_Width + semicolon_offset
             
-            for line_bits == {} {
-                valid_lanes := lanes_less(cast(scan_mask) line_chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
-                chunk       := lanes_masked_load(&data[line_chunk], cast(scan_lane) 0, valid_lanes)
-                line_bits    = lanes_extract_most_significant_bits(lanes_equal(chunk, cast(scan_lane) '\r'))
-                line_chunk  += Scan_Width
-            }
-            line_offset := cast(int) count_trailing_zeros(transmute(u64) line_bits)
-            line_bits   -= { line_offset }
-            line_end    := line_chunk - Scan_Width + line_offset
+            semicolon, line_end: i64
+            semicolon_bits, semicolon_chunk, semicolon = read_bits_in_chunks(data, semicolon_bits, semicolon_chunk, ';')
+            line_bits,      line_chunk,      line_end  = read_bits_in_chunks(data, line_bits,      line_chunk,      '\r')
             
             text  := (cast(^i64) &data[semicolon+1])^
             count := cast(u64) (line_end - semicolon - 1)
@@ -274,7 +282,7 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
             append(&names, name)
             
             index = line_end + len("\r\n")
-            should_break = index >= len(data)
+            should_break = index >= cast(i64) len(data)
             last = index
         }
         spall_end()
@@ -311,20 +319,19 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
             lane_scatter(sum,   lane_gather(sum,   write_mask, 0) + cast(lane_i32) temperatures, write_mask)
             lane_scatter(count, lane_gather(count, write_mask, 0) + 1,                           write_mask)
             
-            old_min := lane_gather(min, write_mask & ~just_inserteds, temperatures)
-            old_max := lane_gather(max, write_mask & ~just_inserteds, temperatures)
+            lane_scatter(min, lanes_min(temperatures, lane_gather(min, write_mask & ~just_inserteds, temperatures)), write_mask)
+            lane_scatter(max, lanes_max(temperatures, lane_gather(max, write_mask & ~just_inserteds, temperatures)), write_mask)
             
-            lane_scatter(min, lanes_min(temperatures, old_min), write_mask)
-            lane_scatter(max, lanes_max(temperatures, old_max), write_mask)
-            
-            source_name := cast(Lane_String) to_lane(&names)
-            entry_name  := cast(Lane_String) lane_member(es, "name")
-            source_data  := lane_member(source_name, "data")
-            source_len   := lane_member(source_name, "len")
-            entry_data   := lane_member(entry_name,  "data")
-            entry_len    := lane_member(entry_name,  "len")
-            lane_scatter_mask(entry_data, lane_gather_mask(source_data, just_inserteds, cast(lane_pmm) nil), just_inserteds)
-            lane_scatter_mask(entry_len,  lane_gather_mask(source_len,  just_inserteds, cast(lane_int) 0),   just_inserteds)
+            if just_inserteds != lane_false {
+                source_name := cast(Lane_String) to_lane(&names)
+                entry_name  := cast(Lane_String) lane_member(es, "name")
+                source_data  := lane_member(source_name, "data")
+                source_len   := lane_member(source_name, "len")
+                entry_data   := lane_member(entry_name,  "data")
+                entry_len    := lane_member(entry_name,  "len")
+                lane_scatter_mask(entry_data, lane_gather_mask(source_data, just_inserteds, cast(lane_pmm) nil), just_inserteds)
+                lane_scatter_mask(entry_len,  lane_gather_mask(source_len,  just_inserteds, cast(lane_int) 0),   just_inserteds)
+            }
             spall_end()
             
             clear(&names)
@@ -408,6 +415,7 @@ lanes_min                           :: intrinsics.simd_min
 lanes_max                           :: intrinsics.simd_max
 lanes_indices                       :: intrinsics.simd_indices
 lanes_masked_load                   :: intrinsics.simd_masked_load
+lanes_masked_consecutive_load       :: intrinsics.simd_masked_expand_load
 lanes_extract_most_significant_bits :: intrinsics.simd_extract_msbs
 
 count_trailing_zeros :: intrinsics.count_trailing_zeros
