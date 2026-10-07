@@ -68,7 +68,7 @@ main :: proc() {
     
     cpu_core_count, _, _ := info.cpu_core_count()
     core_count := Multithreaded ? cpu_core_count : 1
-    parts := split_data(&data, core_count)
+    ranges := split_data(&data, cast(u64) core_count)
     
     threads  := make([] ^thread.Thread, core_count-1)
     arg_list := make([] ParseArgs,      core_count)
@@ -86,7 +86,8 @@ main :: proc() {
     }
     
     for &args, i in arg_list {
-        args.data = parts[i]
+        range := ranges[i]
+        args.data         = data[range.start:range.end]
         args.thread_index = cast(u32) i
     }
     spall_begin("spawn threads")
@@ -186,7 +187,7 @@ main :: proc() {
 
 load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
     file_handle := windows.CreateFileW(DATA_PATH, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, nil)
-    if file_handle == nil do print_error_and_panic()
+    if file_handle == nil { print_error_and_panic() }
     defer windows.CloseHandle(file_handle)
     
     print_error_and_panic :: proc (loc := #caller_location) {
@@ -194,36 +195,38 @@ load_data :: proc() -> (data: []u8, file_mapping_handle:windows.HANDLE) {
     }
     
     file_mapping_handle = windows.CreateFileMappingW(file_handle, nil, 2, 0, 0, nil)
-    if file_mapping_handle == nil do print_error_and_panic()
+    if file_mapping_handle == nil { print_error_and_panic() }
     
     file_size: windows.LARGE_INTEGER
     windows.GetFileSizeEx(file_handle, &file_size)
     
     starting_address := cast([^] u8) windows.MapViewOfFile(file_mapping_handle, windows.FILE_MAP_READ , 0, 0, 0)
-    if starting_address == nil do print_error_and_panic()
+    if starting_address == nil { print_error_and_panic() }
     
     result := starting_address[:file_size]
     return result, file_mapping_handle
 }
 
-split_data :: proc(data: ^[]u8, count := 2) -> [][]u8 {
+Range :: struct { start, end: u64 }
+
+split_data :: proc(data: ^[] u8, count: u64) -> [] Range {
     spall_proc()
     
-    result := make([][]u8, count)
-    splits := make([]int, count, context.temp_allocator)
-    stride := len(data) / count
+    result := make([] Range, count)
+    stride := cast(u64) len(data) / count
     
     for i in 1 ..< count {
-        middle := i * stride
+        index := i * stride
         // fix to end of line
-        for data[middle] != '\n' do middle += 1
-        middle += 1 // after the \n
-        splits[i] = middle
+        for data[index] != '\n' { index += 1 }
+        index += 1
+        
+        result[i-1].end = index
+        result[i].start = index
     }
-    for i in 1 ..< count {
-        result[i - 1] = data[splits[i - 1]:splits[i]]
-    }
-    result[count - 1] = data[splits[count - 1]:]
+    
+    result[count-1].end = cast(u64)len(data)
+    
     return result
 }
 
@@ -252,12 +255,13 @@ parse_entries :: proc (entries: ^Mapping, data: [] u8) {
                 scan_lane :: #simd [Scan_Width] u8
                 scan_mask :: #simd [Scan_Width] u32
                 
-                bits   := bits
-                chunk  := chunk
+                bits  := bits
+                chunk := chunk
                 target, zero := cast(scan_lane) target_byte, cast(scan_lane) 0
                 
+                data_len := cast(scan_mask) len(data)
                 for bits == {} {
-                    read_mask := lanes_less(cast(scan_mask) chunk + lanes_indices(scan_mask), cast(scan_mask) len(data))
+                    read_mask := lanes_less(cast(scan_mask) chunk + lanes_indices(scan_mask), data_len)
                     read      := lanes_masked_load(&data[chunk], zero, read_mask)
                     bits       = transmute(Bits) lanes_extract_most_significant_bits(lanes_equal(read, target))
                     chunk     += Scan_Width
@@ -300,7 +304,7 @@ parse_entries :: proc (entries: ^Mapping, data: [] u8) {
                     hash = hash * 33 + cast(u32) b
                 }
                 
-                temperature := lanes_extract(temperatures, cast(u32) lane)
+                temperature := lanes_extract(temperatures, lane)
                 
                 e := mapping_get_entry(entries, hash, name)
                 
