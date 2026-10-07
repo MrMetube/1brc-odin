@@ -155,13 +155,13 @@ lane_gather_index_no_mask :: proc (lane: Lane_Slice($T), index: lane_u32) -> #si
     result := lane_gather_index_mask(lane, index, lane_true, T{})
     return result
 }
-lane_gather_index_mask :: proc (lane: Lane_Slice($T), index: lane_u32, mask: lane_u32, default: #simd [LaneWidth] T) -> #simd [LaneWidth] T {
+lane_gather_index_mask :: proc (lane: Lane_Slice($T), index: lane_u32, mask: lane_u32, default: #simd [LaneWidth] T, caller_location := #caller_location) -> #simd [LaneWidth] T {
     gather_mask := mask
     when Lane_Slice_Checked {
         gather_mask &= less_than(index, lane.len)
     }
     
-    element := lane_index(lane, index)
+    element := lane_index(lane, index, caller_location = caller_location)
     result  := lane_gather_mask(element, gather_mask, default)
     return result
 }
