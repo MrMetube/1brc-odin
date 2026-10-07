@@ -17,7 +17,6 @@ Multithreaded :: true
 DATA_PATH :: "./data/measurements_10M.txt"
 
 Entry :: struct {
-    name:  string,
     sum:   i32, // probably from -10M to 10M
     count: u32, // at most 1 billion but probably at most 100k
     // fixed point numbers from [-999 to 999]
@@ -31,8 +30,9 @@ Result_Entry :: struct {
 }
 
 Mapping :: struct {
-    hash: [] u32,
-    data: [] Entry,
+    hash:  [] u32,
+    names: [] string,
+    data:  [] Entry,
     count: u32,
 }
 
@@ -107,15 +107,14 @@ main :: proc() {
     mapping_reserve(&entries, Capacity, { sum = 0, count = 0, min = max(i16), max = min(i16) })
     for a in arg_list {
         worker_entries := a.entries
-        for hash, index in worker_entries.hash {
-            if hash == 0 { continue }
+        for it in soa_zip(hash = worker_entries.hash, entry = worker_entries.data, name = worker_entries.names) {
+            if it.hash == 0 { continue }
             
-            entry := worker_entries.data[index]
-                e := mapping_get_entry(&entries, hash, entry.name)
-                e.count += entry.count
-            e.sum   += entry.sum
-            e.min = min(entry.min, e.min)
-            e.max = max(entry.max, e.max)
+            e := mapping_get_entry(&entries, it.hash, it.name)
+            e.count += it.entry.count
+            e.sum   += it.entry.sum
+            e.min = min(it.entry.min, e.min)
+            e.max = max(it.entry.max, e.max)
         }
     }
     spall_end()
@@ -123,14 +122,14 @@ main :: proc() {
     
     spall_begin("prepare results")
     list := make([dynamic] Result_Entry, 0, mapping_len(&entries))
-    for e, index in entries.data {
-        if entries.hash[index] == 0 { continue }
+    for it in soa_zip(hash = entries.hash, entry = entries.data, name = entries.names) {
+        if it.hash == 0 { continue }
         
         append(&list, {
-            mean = (cast(f64) e.sum / cast(f64) e.count) * .1,
-            min  = cast(f64) e.min * .1,
-            max  = cast(f64) e.max * .1,
-            name = e.name,
+            mean = cast(f64) it.entry.sum / cast(f64) it.entry.count * .1,
+            min  = cast(f64) it.entry.min * .1,
+            max  = cast(f64) it.entry.max * .1,
+            name = it.name,
         })
     }
     spall_end()
@@ -300,8 +299,11 @@ parse_entries :: proc (entries: ^Mapping, data: [] u8) {
                 #no_bounds_check for b in name_bytes {
                     hash = hash * 33 + cast(u32) b
                 }
-                e := mapping_get_entry(entries, hash, name)
+                
                 temperature := lanes_extract(temperatures, cast(u32) lane)
+                
+                e := mapping_get_entry(entries, hash, name)
+                
                 e.sum   += cast(i32) temperature
                 e.count += 1
                 e.min = min(e.min, temperature)
@@ -321,7 +323,7 @@ parse_entries :: proc (entries: ^Mapping, data: [] u8) {
 mapping_reserve :: proc (entries: ^Mapping, capacity: u32, default: Entry) {
     make_by_pointer_slice(&entries.hash,  capacity)
     make_by_pointer_slice(&entries.data,  capacity)
-    // make_by_pointer_slice(&entries.names, capacity)
+    make_by_pointer_slice(&entries.names, capacity)
     for &it in entries.data { it = default }
 }
 
@@ -340,10 +342,9 @@ mapping_get_entry :: proc (entries: ^Mapping, hash: u32, name: string) -> ^Entry
         
         if slot == 0 {
             entries.count += 1
-            entries.hash[index] = hash
-            
+            entries.hash[index]  = hash
+            entries.names[index] = name
             result = &entries.data[index]
-            result.name = name
             break
         }
         
