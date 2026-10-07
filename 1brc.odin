@@ -18,8 +18,8 @@ DATA_PATH :: "./data/measurements_10M.txt"
 
 Entry :: struct {
     name:  string,
-    sum:      i32, // probably from -10M to 10M
-    count:    u32, // at most 1 billion but probably at most 100k
+    sum:   i32, // probably from -10M to 10M
+    count: u32, // at most 1 billion but probably at most 100k
     // fixed point numbers from [-999 to 999]
     min: i16,
     max: i16, 
@@ -29,13 +29,20 @@ Result_Entry :: struct {
     name:           string,
     min, mean, max: f64,
 }
-Mapping :: map[u32] Entry
+
+Mapping :: struct {
+    hash: [] u32,
+    data: [] Entry,
+    count: u32,
+}
 
 ParseArgs :: struct {
     thread_index: u32,
     data:    [] u8,
     entries: [LaneWidth] Mapping,
 }
+
+Capacity :: 2<<15
 
 ////////////////////////////////////////////////
 
@@ -69,7 +76,7 @@ main :: proc() {
     spall_begin("reserve entries")
     for &arg in arg_list {
         for lane in 0..<LaneWidth {
-            reserve(&arg.entries[lane], 10000)
+            mymap_reserve(&arg.entries[lane], Capacity, { sum = 0, count = 0, min = max(i16), max = min(i16) })
         }
     }
     spall_end()
@@ -99,19 +106,19 @@ main :: proc() {
     
     spall_begin("merging")
     entries: Mapping
-    reserve(&entries, 10000)
+    mymap_reserve(&entries, Capacity, { sum = 0, count = 0, min = max(i16), max = min(i16) })
     for a in arg_list {
         for lane in 0..<LaneWidth {
-            for name, entry in a.entries[lane] {
-                if name not_in entries {
-                    entries[name] = entry
-                } else {
-                    e := &entries[name]
-                    e.count += entry.count
-                    e.sum += entry.sum
-                    e.min = min(entry.min, e.min)
-                    e.max = max(entry.max, e.max)
-                }
+            lane_entries := a.entries[lane]
+            for hash, index in lane_entries.hash {
+                if hash == 0 { continue }
+                
+                entry := lane_entries.data[index]
+                e := mapping_get_entry(&entries, hash, entry.name)
+                e.count += entry.count
+                e.sum   += entry.sum
+                e.min = min(entry.min, e.min)
+                e.max = max(entry.max, e.max)
             }
         }
     }
@@ -119,23 +126,22 @@ main :: proc() {
     windows.UnmapViewOfFile(file_mapping_handle)
     
     spall_begin("prepare results")
-    list := make([]Result_Entry, len(entries))
-    index: int
-    for _, &e in entries {
-        defer index += 1
-        value := Result_Entry {
+    list := make([dynamic] Result_Entry, 0, mymap_len(&entries))
+    for e, index in entries.data {
+        if entries.hash[index] == 0 { continue }
+        
+        append(&list, {
             mean = (cast(f64) e.sum / cast(f64) e.count) * .1,
             min  = cast(f64) e.min * .1,
             max  = cast(f64) e.max * .1,
             name = e.name,
-        }
-        list[index] = value
+        })
     }
     spall_end()
     
     spall_begin("sort")
     lexical :: proc(a, b: Result_Entry) -> bool { return a.name < b.name }
-    slice.sort_by(list, lexical)
+    slice.sort_by(list[:], lexical)
     spall_end()
     
     spall_begin("format")
@@ -291,7 +297,6 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
             temperatures := parse_temperatures(bytes, counts)
             
             es: Lane(Entry)
-            just_inserteds: lane_u32
             
             spall_begin("hash and map insertion")
             for name, lane in names {
@@ -302,10 +307,8 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
                     hash = hash * 33 + cast(u32) b
                 }
                 
-                _, e, just_inserted, _ := map_entry(&entries[lane], hash)
-                
-                es.p           = lanes_replace(es.p,           lane, cast(umm) e)
-                just_inserteds = lanes_replace(just_inserteds, lane, just_inserted ? true_lane : 0)
+                e := mapping_get_entry(&entries[lane], hash, name)
+                es.p = lanes_replace(es.p, lane, cast(umm) e)
             }
             spall_end()
             
@@ -319,19 +322,9 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
             lane_scatter(sum,   lane_gather(sum,   write_mask, 0) + cast(lane_i32) temperatures, write_mask)
             lane_scatter(count, lane_gather(count, write_mask, 0) + 1,                           write_mask)
             
-            lane_scatter(min, lanes_min(temperatures, lane_gather(min, write_mask & ~just_inserteds, temperatures)), write_mask)
-            lane_scatter(max, lanes_max(temperatures, lane_gather(max, write_mask & ~just_inserteds, temperatures)), write_mask)
+            lane_scatter(min, lanes_min(temperatures, lane_gather(min, write_mask, temperatures)), write_mask)
+            lane_scatter(max, lanes_max(temperatures, lane_gather(max, write_mask, temperatures)), write_mask)
             
-            if just_inserteds != lane_false {
-                source_name := cast(Lane_String) to_lane(&names)
-                entry_name  := cast(Lane_String) lane_member(es, "name")
-                source_data  := lane_member(source_name, "data")
-                source_len   := lane_member(source_name, "len")
-                entry_data   := lane_member(entry_name,  "data")
-                entry_len    := lane_member(entry_name,  "len")
-                lane_scatter_mask(entry_data, lane_gather_mask(source_data, just_inserteds, cast(lane_pmm) nil), just_inserteds)
-                lane_scatter_mask(entry_len,  lane_gather_mask(source_len,  just_inserteds, cast(lane_int) 0),   just_inserteds)
-            }
             spall_end()
             
             clear(&names)
@@ -340,6 +333,50 @@ parse_entries :: proc (entries: ^[LaneWidth] Mapping, data: [] u8) {
         if should_break { break loop }
     }
 }
+
+////////////////////////////////////////////////
+
+mymap_reserve :: proc (entries: ^Mapping, capacity: u32, default: Entry) {
+    make_by_pointer_slice(&entries.hash, capacity)
+    make_by_pointer_slice(&entries.data, capacity)
+    for &it in entries.data { it = default }
+}
+
+mymap_len :: proc (entries: ^Mapping) -> u32 {
+    result := entries.count
+    return result
+}
+
+mapping_get_entry :: proc (entries: ^Mapping, hash: u32, name: string) -> ^Entry {
+    capacity := cast(u32) len(entries.hash)
+    index := hash % capacity
+    
+    result: ^Entry
+    #no_bounds_check for _ in 0..<capacity {
+        slot := entries.hash[index]
+        
+        if slot == 0 {
+            entries.count += 1
+            entries.hash[index] = hash
+            
+            result = &entries.data[index]
+            result.name = name
+            break
+        }
+        
+        if slot == hash {
+            result = &entries.data[index]
+            break
+        }
+        
+        index += 1
+        if index >= capacity { index -= capacity }
+    }
+    
+    return result
+}
+
+////////////////////////////////////////////////
 
 parse_temperatures :: proc (bytes: lane_i64, counts: lane_u64) -> lane_i16 #no_bounds_check {
     spall_proc()
